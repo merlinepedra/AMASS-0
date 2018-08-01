@@ -1,14 +1,13 @@
 name: amass
-version: 'v2.3.3'
-summary: In-Depth Subdomain Enumeration
+version: 'v2.4.2'
+summary: In-Depth DNS Enumeration
 description: |
-  The amass tool searches Internet data sources, performs brute-force 
-  subdomain enumeration, searches web archives, and uses machine learning
-  to generate additional subdomain name guesses. DNS name resolution
-  is performed across many public servers so the authoritative server
-  will see the traffic coming from different locations.
-
-
+  The OWASP Amass tool obtains subdomain names by scraping data sources, 
+  recursive brute forcing, crawling web archives, permuting/altering names 
+  and reverse DNS sweeping. Additionally, Amass uses the IP addresses 
+  obtained during resolution to discover associated netblocks and ASNs. All 
+  the information is then used to build maps of the target networks.
+icon: images/snapcraft_icon.png
 grade: stable
 confinement: strict
 
@@ -18,13 +17,43 @@ apps:
     command: bin/amass
     plugs: [home, network, removable-media]
 
+  maltego:
+    command: bin/maltego
+    plugs: [home, network, removable-media]
+
 
 parts:
   go:
     source-tag: go1.10
+
   amass:
     after: [go]
-    source: https://github.com/caffix/amass
+    source: https://github.com/OWASP/Amass
     source-type: git
     plugin: go
-    go-importpath: github.com/caffix/amass
+    go-importpath: github.com/OWASP/Amass
+    override-build: |
+      echo "\nStarting override-build for amass part:"
+      export GOPATH=$(dirname $SNAPCRAFT_PART_INSTALL)/go
+      cd $GOPATH/src/github.com/OWASP/Amass
+      go get -u ./...
+      go install ./...
+      mkdir $SNAPCRAFT_PART_INSTALL/bin
+      mv $GOPATH/bin/amass $SNAPCRAFT_PART_INSTALL/bin/amass
+      strip --remove-section=.comment --remove-section=.note $SNAPCRAFT_PART_INSTALL/bin/amass
+  
+  maltego:
+    after: [amass]
+    source: https://github.com/OWASP/Amass
+    source-type: git
+    plugin: go
+    go-importpath: github.com/OWASP/Amass
+    override-build: |
+      echo "\nStarting override-build for maltego part:"
+      export GOPATH=$(dirname $SNAPCRAFT_PART_INSTALL)/go
+      cd $GOPATH/src/github.com/OWASP/Amass
+      go get -u ./...
+      go install ./...
+      mkdir $SNAPCRAFT_PART_INSTALL/bin
+      mv $GOPATH/bin/maltego $SNAPCRAFT_PART_INSTALL/bin/maltego
+      strip --remove-section=.comment --remove-section=.note $SNAPCRAFT_PART_INSTALL/bin/maltego

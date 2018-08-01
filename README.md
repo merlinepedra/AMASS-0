@@ -9,7 +9,6 @@
 [![Chat on Discord](https://img.shields.io/discord/433729817918308352.svg?logo=discord)](https://discord.gg/rtN8GMd) 
 [![Follow on Twitter](https://img.shields.io/twitter/follow/jeff_foley.svg?logo=twitter)](https://twitter.com/jeff_foley)
 
-
 ## The Official Amass Repository Has Moved
 
 Amass is now an OWASP project and the [OWASP GitHub organization repository](https://github.com/OWASP/Amass) is where all further development and releases will take place.

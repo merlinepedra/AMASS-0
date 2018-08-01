@@ -10,7 +10,6 @@ import (
 	"unicode"
 
 	evbus "github.com/asaskevich/EventBus"
-	"github.com/caffix/amass/amass/internal/utils"
 )
 
 type AlterationService struct {
@@ -77,7 +76,6 @@ func (as *AlterationService) executeAlterations() {
 	}
 	as.flipNumbersInName(req)
 	as.appendNumbers(req)
-	//go a.PrefixSuffixWords(name)
 }
 
 // flipNumbersInName - Method to flip numbers in a subdomain name
@@ -114,9 +112,6 @@ func (as *AlterationService) secondNumberFlip(name, domain string, minIndex int)
 		n := name[:last] + strconv.Itoa(i) + name[last+1:]
 
 		as.sendAlteredName(n, domain)
-		// Going too fast will overwhelm the dns
-		// service and overuse memory
-		time.Sleep(as.Config().Frequency)
 	}
 	// Take the second number out
 	as.sendAlteredName(name[:last]+name[last+1:], domain)
@@ -135,39 +130,13 @@ func (as *AlterationService) appendNumbers(req *AmassRequest) {
 		// Send a LABELNUM altered name
 		nn := parts[0] + strconv.Itoa(i) + "." + parts[1]
 		as.sendAlteredName(nn, req.Domain)
-		// Going too fast will overwhelm the dns
-		// service and overuse memory
-		time.Sleep(as.Config().Frequency)
 	}
 }
-
-/*
-// prefixSuffixWords - Method for adding words to the prefix and suffix of a subdomain name
-func (as *AlterationService) prefixSuffixWords(req *AmassRequest) {
-	for _, word := range a.Wordlist {
-		// Send the new names with the word as a prefix and suffix of the leftmost label
-		as.prefixWord(req.Name, word, req.Domain)
-		as.suffixWord(req.Name, word, req.Domain)
-	}
-}
-
-func (as *AlterationService) prefixWord(name, word, domain string) {
-	as.sendAlteredName(word+"-"+name, domain)
-}
-
-func (as *AlterationService) suffixWord(name, word, domain string) {
-	parts := strings.SplitN(name, ".", 2)
-	n := parts[0] + "-" + word + "." + parts[1]
-
-	as.sendAlteredName(n, domain)
-}
-*/
 
 // Checks that the name is valid and sends along for DNS resolve
 func (as *AlterationService) sendAlteredName(name, domain string) {
-	re := utils.SubdomainRegex(domain)
-
-	if re.MatchString(name) {
+	re := as.Config().DomainRegex(domain)
+	if re != nil && re.MatchString(name) {
 		as.bus.Publish(DNSQUERY, &AmassRequest{
 			Name:   name,
 			Domain: domain,

@@ -4,16 +4,15 @@
 package amass
 
 import (
+	"bufio"
+	"errors"
 	"io"
 	"io/ioutil"
 	"log"
 	"net"
 	"os"
-	"sync"
-	"time"
-	"bufio"
-	"errors"
 	"strings"
+	"time"
 
 	"github.com/OWASP/Amass/amass/core"
 	"github.com/OWASP/Amass/amass/dnssrv"
@@ -23,11 +22,28 @@ import (
 	evbus "github.com/asaskevich/EventBus"
 )
 
-const (
-	Version string = "v2.5.0"
-	Author  string = "Jeff Foley (@jeff_foley)"
+var Banner string = `
 
-	DefaultFrequency time.Duration = 10 * time.Millisecond
+        .+++:.            :                             .+++.                   
+      +W@@@@@@8        &+W@#               o8W8:      +W@@@@@@#.   oW@@@W#+     
+     &@#+   .o@##.    .@@@o@W.o@@o       :@@#&W8o    .@#:  .:oW+  .@#+++&#&     
+    +@&        &@&     #@8 +@W@&8@+     :@W.   +@8   +@:          .@8           
+    8@          @@     8@o  8@8  WW    .@W      W@+  .@W.          o@#:         
+    WW          &@o    &@:  o@+  o@+   #@.      8@o   +W@#+.        +W@8:       
+    #@          :@W    &@+  &@+   @8  :@o       o@o     oW@@W+        oW@8      
+    o@+          @@&   &@+  &@+   #@  &@.      .W@W       .+#@&         o@W.    
+     WW         +@W@8. &@+  :&    o@+ #@      :@W&@&         &@:  ..     :@o    
+     :@W:      o@# +Wo &@+        :W: +@W&o++o@W. &@&  8@#o+&@W.  #@:    o@+    
+      :W@@WWWW@@8       +              :&W@@@@&    &W  .o#@@W&.   :W@WWW@@&     
+        +o&&&&+.                                                    +oooo.      
+
+`
+
+const (
+	Version = "v2.6.1"
+	Author  = "Jeff Foley (@jeff_foley)"
+
+	DefaultFrequency   = 10 * time.Millisecond
 	defaultWordlistURL = "https://raw.githubusercontent.com/OWASP/Amass/master/wordlists/namelist.txt"
 )
 
@@ -159,23 +175,23 @@ func (e *Enumeration) generateAmassConfig() (*core.AmassConfig, error) {
 	}
 
 	config := &core.AmassConfig{
-		Log: e.Log,
-		ASNs: e.ASNs,
-		CIDRs: e.CIDRs,
-		IPs: e.IPs,
-		Ports: e.Ports,
-		Whois: e.Whois,
-		Wordlist: e.Wordlist,
-		BruteForcing: e.BruteForcing,
-		Recursive: e.Recursive,
+		Log:             e.Log,
+		ASNs:            e.ASNs,
+		CIDRs:           e.CIDRs,
+		IPs:             e.IPs,
+		Ports:           e.Ports,
+		Whois:           e.Whois,
+		Wordlist:        e.Wordlist,
+		BruteForcing:    e.BruteForcing,
+		Recursive:       e.Recursive,
 		MinForRecursive: e.MinForRecursive,
-		Alterations: e.Alterations,
-		NoDNS: e.NoDNS,
-		Active: e.Active,
-		Blacklist: e.Blacklist,
-		Frequency: e.Frequency,
-		Resolvers: e.Resolvers,
-		Neo4jPath: e.Neo4jPath,
+		Alterations:     e.Alterations,
+		NoDNS:           e.NoDNS,
+		Active:          e.Active,
+		Blacklist:       e.Blacklist,
+		Frequency:       e.Frequency,
+		Resolvers:       e.Resolvers,
+		Neo4jPath:       e.Neo4jPath,
 	}
 
 	for _, domain := range e.Domains() {
@@ -186,8 +202,6 @@ func (e *Enumeration) generateAmassConfig() (*core.AmassConfig, error) {
 
 func (e *Enumeration) Start() error {
 	var services []core.AmassService
-	var filterMutex sync.Mutex
-	filter := make(map[string]struct{})
 
 	config, err := e.generateAmassConfig()
 	if err != nil {
@@ -196,15 +210,7 @@ func (e *Enumeration) Start() error {
 	utils.SetDialContext(dnssrv.DialContext)
 
 	bus := evbus.New()
-	bus.SubscribeAsync(core.OUTPUT, func(out *AmassOutput) {
-		filterMutex.Lock()
-		defer filterMutex.Unlock()
-
-		if _, found := filter[out.Name]; !found {
-			filter[out.Name] = struct{}{}
-			e.Output <- out
-		}
-	}, false)
+	bus.SubscribeAsync(core.OUTPUT, e.sendOutput, false)
 
 	services = append(services, NewSourcesService(config, bus))
 	var data *DataManagerService
@@ -250,8 +256,15 @@ func (e *Enumeration) Start() error {
 	for _, service := range services {
 		service.Stop()
 	}
+
+	bus.Unsubscribe(core.OUTPUT, e.sendOutput)
+	bus.WaitAsync()
 	close(e.Output)
 	return nil
+}
+
+func (e *Enumeration) sendOutput(out *AmassOutput) {
+	e.Output <- out
 }
 
 func (e *Enumeration) WriteVisjsFile(path string) {
@@ -319,12 +332,6 @@ func (e *Enumeration) WriteD3File(path string) {
 }
 
 func (e *Enumeration) ObtainAdditionalDomains() {
-	ips := e.allIPsInConfig()
-
-	if len(ips) > 0 {
-		e.pullAllCertificates(ips)
-	}
-
 	if e.Whois {
 		for _, domain := range e.domains {
 			more, err := ReverseWhois(domain)
@@ -338,80 +345,6 @@ func (e *Enumeration) ObtainAdditionalDomains() {
 			}
 		}
 	}
-}
-
-func (e *Enumeration) allIPsInConfig() []net.IP {
-	var ips []net.IP
-
-	ips = append(ips, e.IPs...)
-
-	for _, cidr := range e.CIDRs {
-		ips = append(ips, utils.NetHosts(cidr)...)
-	}
-
-	for _, asn := range e.ASNs {
-		record, err := ASNRequest(asn)
-		if err != nil {
-			e.Log.Printf("%v", err)
-			continue
-		}
-
-		for _, cidr := range record.Netblocks {
-			_, ipnet, err := net.ParseCIDR(cidr)
-			if err != nil {
-				continue
-			}
-
-			ips = append(ips, utils.NetHosts(ipnet)...)
-		}
-	}
-	return ips
-}
-
-func (e *Enumeration) pullAllCertificates(ips []net.IP) {
-	var running int
-	done := make(chan struct{}, 100)
-
-	t := time.NewTicker(100 * time.Millisecond)
-	defer t.Stop()
-loop:
-	for {
-		select {
-		case <-t.C:
-			if running >= 100 || len(ips) <= 0 {
-				break
-			}
-
-			running++
-
-			addr := ips[0]
-			if len(ips) == 1 {
-				ips = []net.IP{}
-			} else {
-				ips = ips[1:]
-			}
-
-			go e.executeActiveCert(addr.String(), done)
-		case <-done:
-			running--
-			if running == 0 && len(ips) <= 0 {
-				break loop
-			}
-		}
-	}
-}
-
-func (e *Enumeration) executeActiveCert(addr string, done chan struct{}) {
-	var domains []string
-
-	for _, r := range PullCertificateNames(addr, e.Ports) {
-		domains = utils.UniqueAppend(domains, r.Domain)
-	}
-
-	for _, domain := range domains {
-		e.AddDomain(domain)
-	}
-	done <- struct{}{}
 }
 
 func getDefaultWordlist() ([]string, error) {

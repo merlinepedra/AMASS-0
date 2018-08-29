@@ -25,7 +25,7 @@ type DataManagerService struct {
 	core.BaseAmassService
 
 	bus     evbus.Bus
-	Graph *handlers.Graph
+	Graph   *handlers.Graph
 	neo4j   *handlers.Neo4j
 	domains map[string]struct{}
 }
@@ -289,7 +289,8 @@ func (dms *DataManagerService) insertSRV(req *core.AmassRequest, recidx int) {
 }
 
 func (dms *DataManagerService) insertNS(req *core.AmassRequest, recidx int) {
-	target := strings.ToLower(removeLastDot(req.Records[recidx].Data))
+	pieces := strings.Split(req.Records[recidx].Data, ",")
+	target := strings.ToLower(pieces[len(pieces)-1])
 	domain := strings.ToLower(SubdomainToDomain(target))
 	if target == "" || domain == "" {
 		return
@@ -582,4 +583,3 @@ func removeLastDot(name string) string {
 	}
 	return name
 }
-

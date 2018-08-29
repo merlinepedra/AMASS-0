@@ -17,8 +17,8 @@ import (
 	"time"
 
 	"github.com/OWASP/Amass/amass/core"
-	"github.com/OWASP/Amass/amass/utils"
 	"github.com/OWASP/Amass/amass/dnssrv"
+	"github.com/OWASP/Amass/amass/utils"
 )
 
 type ASRecord struct {
@@ -66,12 +66,13 @@ func SubdomainToDomain(name string) string {
 		return domain
 	}
 	// Check the DNS for all parts of the name
-	for i := len(labels) - 2; i >= 0; i-- {
+	for i := 0; i < len(labels); i++ {
 		sub := strings.Join(labels[i:], ".")
 
-		if _, err := dnssrv.Resolve(sub, "NS"); err == nil {
-			domainCache[sub] = struct{}{}
-			domain = sub
+		if ns, err := dnssrv.Resolve(sub, "NS"); err == nil {
+			pieces := strings.Split(ns[0].Data, ",")
+			domainCache[pieces[0]] = struct{}{}
+			domain = pieces[0]
 			break
 		}
 	}
@@ -314,6 +315,9 @@ func fetchOnlineNetblockData(asn int) ([]string, error) {
 
 func parseASNInfo(line string) *ASRecord {
 	fields := strings.Split(line, " | ")
+	if len(fields) < 5 {
+		return nil
+	}
 
 	asn, err := strconv.Atoi(fields[0])
 	if err != nil {

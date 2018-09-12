@@ -4,6 +4,7 @@
 package core
 
 import (
+	"io"
 	"log"
 	"net"
 	"regexp"
@@ -52,9 +53,9 @@ type AmassConfig struct {
 	Alterations bool
 
 	// Only access the data sources for names and return results?
-	NoDNS bool
+	Passive bool
 
-	// Determines if active information gathering techniques will be used
+	// Determines if zone transfers will be attempted
 	Active bool
 
 	// A blacklist of subdomain names that will not be investigated
@@ -66,8 +67,8 @@ type AmassConfig struct {
 	// Preferred DNS resolvers identified by the user
 	Resolvers []string
 
-	// The Neo4j URL used by the bolt driver to connect with the database
-	Neo4jPath string
+	// The writer used to save the data operations performed
+	DataOptsWriter io.Writer
 
 	// The root domain names that the enumeration will target
 	domains []string

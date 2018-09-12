@@ -43,9 +43,9 @@ func NewSourcesService(config *core.AmassConfig, bus evbus.Bus) *SourcesService 
 
 	for _, source := range sources.GetAllSources() {
 		if source.Type() == core.ARCHIVE {
-			if false {
-				ss.throttles = append(ss.throttles, source)
-			}
+			//if false {
+			ss.throttles = append(ss.throttles, source)
+			//}
 		} else {
 			ss.directs = append(ss.directs, source)
 		}
@@ -67,6 +67,14 @@ func (ss *SourcesService) OnStart() error {
 	return nil
 }
 
+func (ss *SourcesService) OnPause() error {
+	return nil
+}
+
+func (ss *SourcesService) OnResume() error {
+	return nil
+}
+
 func (ss *SourcesService) OnStop() error {
 	ss.BaseAmassService.OnStop()
 
@@ -75,19 +83,23 @@ func (ss *SourcesService) OnStop() error {
 }
 
 func (ss *SourcesService) processRequests() {
-	t := time.NewTicker(1 * time.Second)
-	defer t.Stop()
-
+	t := time.NewTicker(time.Second)
+loop:
 	for {
 		select {
 		case <-t.C:
 			if req := ss.NextRequest(); req != nil {
 				go ss.handleRequest(req)
 			}
+		case <-ss.PauseChan():
+			t.Stop()
+		case <-ss.ResumeChan():
+			t = time.NewTicker(time.Second)
 		case <-ss.Quit():
-			return
+			break loop
 		}
 	}
+	t.Stop()
 }
 
 func (ss *SourcesService) handleRequest(req *core.AmassRequest) {
@@ -141,13 +153,17 @@ func (ss *SourcesService) handleOutput(req *core.AmassRequest) {
 		req.Name = req.Name[i[1]:]
 	}
 	req.Name = strings.TrimSpace(strings.ToLower(req.Name))
+	// Remove dots at the beginning of names
+	if len(req.Name) > 1 && req.Name[0] == '.' {
+		req.Name = req.Name[1:]
+	}
 
 	if ss.outDup(req.Name) {
 		return
 	}
 
 	ss.SetActive()
-	if ss.Config().NoDNS {
+	if ss.Config().Passive {
 		ss.bus.Publish(core.OUTPUT, &AmassOutput{
 			Name:   req.Name,
 			Domain: req.Domain,
@@ -243,8 +259,7 @@ func (ss *SourcesService) processThrottleQueue() {
 	done := make(chan struct{}, MAX_THROTTLED)
 
 	t := time.NewTicker(100 * time.Millisecond)
-	defer t.Stop()
-
+loop:
 	for {
 		select {
 		case <-t.C:
@@ -261,8 +276,13 @@ func (ss *SourcesService) processThrottleQueue() {
 			}
 		case <-done:
 			running--
+		case <-ss.PauseChan():
+			t.Stop()
+		case <-ss.ResumeChan():
+			t = time.NewTicker(100 * time.Millisecond)
 		case <-ss.Quit():
-			return
+			break loop
 		}
 	}
+	t.Stop()
 }

@@ -10,7 +10,6 @@ import (
 	"io/ioutil"
 	"log"
 	"net"
-	"os"
 	"strings"
 	"time"
 
@@ -18,7 +17,6 @@ import (
 	"github.com/OWASP/Amass/amass/dnssrv"
 	"github.com/OWASP/Amass/amass/handlers"
 	"github.com/OWASP/Amass/amass/utils"
-	"github.com/OWASP/Amass/amass/utils/viz"
 	evbus "github.com/asaskevich/EventBus"
 )
 
@@ -40,8 +38,8 @@ var Banner string = `
 `
 
 const (
-	Version = "v2.6.1"
-	Author  = "Jeff Foley (@jeff_foley)"
+	Version = "2.6.5"
+	Author  = "https://github.com/OWASP/Amass"
 
 	DefaultFrequency   = 10 * time.Millisecond
 	defaultWordlistURL = "https://raw.githubusercontent.com/OWASP/Amass/master/wordlists/namelist.txt"
@@ -104,7 +102,7 @@ type Enumeration struct {
 	Alterations bool
 
 	// Only access the data sources for names and return results?
-	NoDNS bool
+	Passive bool
 
 	// Determines if active information gathering techniques will be used
 	Active bool
@@ -118,11 +116,18 @@ type Enumeration struct {
 	// Preferred DNS resolvers identified by the user
 	Resolvers []string
 
-	// The Neo4j URL used by the bolt driver to connect with the database
-	Neo4jPath string
+	// The writer used to save the data operations performed
+	DataOptsWriter io.Writer
 
 	// The root domain names that the enumeration will target
 	domains []string
+
+	// Pause/Resume channels for halting the enumeration
+	pause  chan struct{}
+	resume chan struct{}
+
+	// Broadcast channel that indicates no further writes to the output channel
+	done chan struct{}
 }
 
 func NewEnumeration() *Enumeration {
@@ -134,6 +139,9 @@ func NewEnumeration() *Enumeration {
 		Alterations:     true,
 		Frequency:       10 * time.Millisecond,
 		MinForRecursive: 1,
+		pause:           make(chan struct{}),
+		resume:          make(chan struct{}),
+		done:            make(chan struct{}),
 	}
 }
 
@@ -150,11 +158,11 @@ func (e *Enumeration) generateAmassConfig() (*core.AmassConfig, error) {
 		return nil, errors.New("The configuration did not have an output channel")
 	}
 
-	if e.NoDNS && e.BruteForcing {
+	if e.Passive && e.BruteForcing {
 		return nil, errors.New("Brute forcing cannot be performed without DNS resolution")
 	}
 
-	if e.NoDNS && e.Active {
+	if e.Passive && e.Active {
 		return nil, errors.New("Active enumeration cannot be performed without DNS resolution")
 	}
 
@@ -162,8 +170,8 @@ func (e *Enumeration) generateAmassConfig() (*core.AmassConfig, error) {
 		return nil, errors.New("The configuration contains a invalid frequency")
 	}
 
-	if e.NoDNS && e.Neo4jPath != "" {
-		return nil, errors.New("Data cannot be provided to Neo4j without DNS resolution")
+	if e.Passive && e.DataOptsWriter != nil {
+		return nil, errors.New("Data operations cannot be saved without DNS resolution")
 	}
 
 	if len(e.Ports) == 0 {
@@ -186,12 +194,12 @@ func (e *Enumeration) generateAmassConfig() (*core.AmassConfig, error) {
 		Recursive:       e.Recursive,
 		MinForRecursive: e.MinForRecursive,
 		Alterations:     e.Alterations,
-		NoDNS:           e.NoDNS,
+		Passive:         e.Passive,
 		Active:          e.Active,
 		Blacklist:       e.Blacklist,
 		Frequency:       e.Frequency,
 		Resolvers:       e.Resolvers,
-		Neo4jPath:       e.Neo4jPath,
+		DataOptsWriter:  e.DataOptsWriter,
 	}
 
 	for _, domain := range e.Domains() {
@@ -214,7 +222,7 @@ func (e *Enumeration) Start() error {
 
 	services = append(services, NewSourcesService(config, bus))
 	var data *DataManagerService
-	if !config.NoDNS {
+	if !config.Passive {
 		data = NewDataManagerService(config, bus)
 
 		services = append(services,
@@ -234,101 +242,61 @@ func (e *Enumeration) Start() error {
 	if data != nil {
 		e.Graph = data.Graph
 	}
-
 	// Periodically check if all the services have finished
-	t := time.NewTicker(1 * time.Second)
-	defer t.Stop()
-	for range t.C {
-		done := true
+	t := time.NewTicker(time.Second)
+loop:
+	for {
+		select {
+		case <-e.pause:
+			t.Stop()
+		case <-e.resume:
+			t = time.NewTicker(time.Second)
+		case <-t.C:
+			done := true
 
-		for _, service := range services {
-			if service.IsActive() {
-				done = false
-				break
+			for _, service := range services {
+				if service.IsActive() {
+					done = false
+					break
+				}
+			}
+
+			if done {
+				break loop
 			}
 		}
 
-		if done {
-			break
-		}
 	}
+	t.Stop()
 	// Stop all the services
 	for _, service := range services {
 		service.Stop()
 	}
-
+	// Wait for output to finish being handled
 	bus.Unsubscribe(core.OUTPUT, e.sendOutput)
 	bus.WaitAsync()
+	close(e.done)
+	time.Sleep(2 * time.Second)
 	close(e.Output)
 	return nil
 }
 
+func (e *Enumeration) Pause() {
+	e.pause <- struct{}{}
+}
+
+func (e *Enumeration) Resume() {
+	e.resume <- struct{}{}
+}
+
 func (e *Enumeration) sendOutput(out *AmassOutput) {
-	e.Output <- out
-}
-
-func (e *Enumeration) WriteVisjsFile(path string) {
-	if e.Graph == nil || path == "" {
+	// Check if the output channel has been closed
+	select {
+	case <-e.done:
 		return
+	default:
+		e.Output <- out
 	}
-
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0644)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-
-	nodes, edges := e.Graph.VizData()
-	viz.WriteVisjsData(nodes, edges, f)
-	f.Sync()
-}
-
-func (e *Enumeration) WriteGraphistryFile(path string) {
-	if e.Graph == nil || path == "" {
-		return
-	}
-
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0644)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-
-	nodes, edges := e.Graph.VizData()
-	viz.WriteGraphistryData(nodes, edges, f)
-	f.Sync()
-}
-
-func (e *Enumeration) WriteGEXFFile(path string) {
-	if e.Graph == nil || path == "" {
-		return
-	}
-
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0644)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-
-	nodes, edges := e.Graph.VizData()
-	viz.WriteGEXFData(nodes, edges, f)
-	f.Sync()
-}
-
-func (e *Enumeration) WriteD3File(path string) {
-	if e.Graph == nil || path == "" {
-		return
-	}
-
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0644)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-
-	nodes, edges := e.Graph.VizData()
-	viz.WriteD3Data(nodes, edges, f)
-	f.Sync()
 }
 
 func (e *Enumeration) ObtainAdditionalDomains() {

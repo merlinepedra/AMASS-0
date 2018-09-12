@@ -15,16 +15,12 @@ import (
 )
 
 type OutputParams struct {
-	Enum          *amass.Enumeration
-	Verbose       bool
-	PrintIPs      bool
-	FileOut       string
-	JSONOut       string
-	VisjsOut      string
-	GraphistryOut string
-	GEXFOut       string
-	D3Out         string
-	Done          chan struct{}
+	Enum     *amass.Enumeration
+	Verbose  bool
+	PrintIPs bool
+	FileOut  string
+	JSONOut  string
+	Done     chan struct{}
 }
 
 type ASNData struct {
@@ -180,11 +176,6 @@ func ManageOutput(params *OutputParams) {
 			WriteJSONData(jsonptr, result)
 		}
 	}
-
-	params.Enum.WriteVisjsFile(params.VisjsOut)
-	params.Enum.WriteGraphistryFile(params.GraphistryOut)
-	params.Enum.WriteGEXFFile(params.GEXFOut)
-	params.Enum.WriteD3File(params.D3Out)
 	// Check to print the summary information
 	if params.Verbose {
 		PrintSummary(total, tags, asns)
@@ -224,8 +215,9 @@ func PrintSummary(total int, tags map[string]int, asns map[int]*ASNData) {
 
 	fmt.Println()
 	// Print the header information
-	b.Print("Amass " + amass.Version)
-	num := 80 - (len(amass.Version) + len(amass.Author) + 6)
+	title := "OWASP Amass v"
+	b.Print(title + amass.Version)
+	num := 80 - (len(title) + len(amass.Version) + len(amass.Author))
 	pad(num, " ")
 	b.Printf("%s\n", amass.Author)
 	pad(8, "----------")

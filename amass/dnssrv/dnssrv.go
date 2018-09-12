@@ -6,6 +6,7 @@ package dnssrv
 import (
 	"context"
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -58,7 +59,16 @@ func (ds *DNSService) OnStart() error {
 	ds.BaseAmassService.OnStart()
 
 	ds.bus.SubscribeAsync(core.DNSQUERY, ds.SendRequest, false)
+	ds.bus.SubscribeAsync(core.DNSSWEEP, ds.ReverseDNSSweep, false)
 	go ds.processRequests()
+	return nil
+}
+
+func (ds *DNSService) OnPause() error {
+	return nil
+}
+
+func (ds *DNSService) OnResume() error {
 	return nil
 }
 
@@ -66,21 +76,26 @@ func (ds *DNSService) OnStop() error {
 	ds.BaseAmassService.OnStop()
 
 	ds.bus.Unsubscribe(core.DNSQUERY, ds.SendRequest)
+	ds.bus.Unsubscribe(core.DNSSWEEP, ds.ReverseDNSSweep)
 	return nil
 }
 
 func (ds *DNSService) processRequests() {
 	t := time.NewTicker(ds.Config().Frequency)
-	defer t.Stop()
 loop:
 	for {
 		select {
 		case <-t.C:
 			ds.performRequest()
+		case <-ds.PauseChan():
+			t.Stop()
+		case <-ds.ResumeChan():
+			t = time.NewTicker(ds.Config().Frequency)
 		case <-ds.Quit():
 			break loop
 		}
 	}
+	t.Stop()
 }
 
 func (ds *DNSService) duplicate(name string) bool {
@@ -112,8 +127,6 @@ var InitialQueryTypes = []uint16{
 	dns.TypeA,
 	dns.TypeAAAA,
 	dns.TypeCNAME,
-	dns.TypePTR,
-	dns.TypeSRV,
 }
 
 func (ds *DNSService) completeQueries(req *core.AmassRequest) {
@@ -292,26 +305,69 @@ func (ds *DNSService) attemptZoneXFR(domain, sub, server string) {
 }
 
 func (ds *DNSService) queryServiceNames(subdomain, domain string) {
-	var answers []core.DNSAnswer
-
 	// Check all the popular SRV records
 	for _, name := range popularSRVRecords {
 		srvName := name + "." + subdomain
 
-		if ans, err := Resolve(srvName, "SRV"); err == nil {
-			answers = append(answers, ans...)
-		} else {
-			ds.Config().Log.Printf("DNS SRV record query error: %s: %v", srvName, err)
-		}
-		// Do not go too fast
-		time.Sleep(ds.Config().Frequency)
-	}
+		for i := 0; i < 3; i++ {
+			// Do not go too fast
+			time.Sleep(ds.Config().Frequency)
 
-	ds.bus.Publish(core.RESOLVED, &core.AmassRequest{
-		Name:    subdomain,
-		Domain:  domain,
-		Records: answers,
-		Tag:     "dns",
-		Source:  "Forward DNS",
-	})
+			a, err, again := ds.executeQuery(srvName, dns.TypeSRV)
+			if err == nil {
+				ds.bus.Publish(core.RESOLVED, &core.AmassRequest{
+					Name:    srvName,
+					Domain:  domain,
+					Records: a,
+					Tag:     "dns",
+					Source:  "Forward DNS",
+				})
+				break
+			}
+			if !again {
+				break
+			}
+		}
+	}
+}
+
+func (ds *DNSService) ReverseDNSSweep(domain, addr string, cidr *net.IPNet) {
+	// Get the subset of 200 nearby IP addresses
+	ips := utils.CIDRSubset(cidr, addr, 200)
+	// Go through the IP addresses
+	for _, ip := range ips {
+		var ptr string
+
+		if len(ip.To4()) == net.IPv4len {
+			ptr = utils.ReverseIP(ip.String()) + ".in-addr.arpa"
+		} else if len(ip) == net.IPv6len {
+			ptr = utils.IPv6NibbleFormat(utils.HexString(ip)) + ".ip6.arpa"
+		} else {
+			continue
+		}
+
+		if ds.duplicate(ptr) {
+			continue
+		}
+
+		for i := 0; i < 3; i++ {
+			// Do not go too fast
+			time.Sleep(ds.Config().Frequency)
+
+			a, err, again := ds.executeQuery(ptr, dns.TypePTR)
+			if err == nil {
+				ds.bus.Publish(core.RESOLVED, &core.AmassRequest{
+					Name:    ptr,
+					Domain:  domain,
+					Records: a,
+					Tag:     "dns",
+					Source:  "Reverse DNS",
+				})
+				break
+			}
+			if !again {
+				break
+			}
+		}
+	}
 }

@@ -13,7 +13,7 @@
 
 Amass is now an OWASP project and the [OWASP GitHub organization repository](https://github.com/OWASP/Amass) is where all further development and releases will take place.
 
-![Image of a network graph](https://github.com/OWASP/Amass/blob/master/images/network_06092018.png "Internet Satellite Imagery")
+![Network graph](https://github.com/OWASP/Amass/blob/master/images/network_06092018.png "Internet Satellite Imagery")
 
 ## Community
 
@@ -32,3 +32,9 @@ Amass is now an OWASP project and the [OWASP GitHub organization repository](htt
  - [Project Sonar: An Underrated Source of Internet-wide Data](https://0xpatrik.com/project-sonar-guide/)
  - [Go is for everyone](https://changelog.com/gotime/71)
  - [Top Five Ways the Red Team breached the External Perimeter](https://medium.com/@adam.toscher/top-five-ways-the-red-team-breached-the-external-perimeter-262f99dc9d17)
+
+## Example Amass Terminal Capture 
+
+Presented at Facebook (and shared publically) for the Sept. 2018 OWASP London Chapter meeting:
+
+[![asciicast](https://asciinema.org/a/v6B1qdMRlLRUflpkwRPhvCTaY.png)](https://asciinema.org/a/v6B1qdMRlLRUflpkwRPhvCTaY)

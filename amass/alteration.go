@@ -30,8 +30,10 @@ func NewAlterationService(config *core.AmassConfig, bus evbus.Bus) *AlterationSe
 func (as *AlterationService) OnStart() error {
 	as.BaseAmassService.OnStart()
 
-	as.bus.SubscribeAsync(core.RESOLVED, as.SendRequest, false)
-	go as.processRequests()
+	if as.Config().Alterations {
+		as.bus.SubscribeAsync(core.RESOLVED, as.SendRequest, false)
+		go as.processRequests()
+	}
 	return nil
 }
 
@@ -46,46 +48,38 @@ func (as *AlterationService) OnResume() error {
 func (as *AlterationService) OnStop() error {
 	as.BaseAmassService.OnStop()
 
-	as.bus.Unsubscribe(core.RESOLVED, as.SendRequest)
+	if as.Config().Alterations {
+		as.bus.Unsubscribe(core.RESOLVED, as.SendRequest)
+	}
 	return nil
 }
 
 func (as *AlterationService) processRequests() {
-	t := time.NewTicker(as.Config().Frequency)
-loop:
+	t := time.NewTicker(1 * time.Millisecond)
+	defer t.Stop()
+
 	for {
 		select {
 		case <-t.C:
-			go as.executeAlterations()
+			if req := as.NextRequest(); req != nil {
+				as.executeAlterations(req)
+			}
 		case <-as.PauseChan():
 			t.Stop()
 		case <-as.ResumeChan():
-			t = time.NewTicker(as.Config().Frequency)
+			t = time.NewTicker(1 * time.Millisecond)
 		case <-as.Quit():
-			break loop
+			return
 		}
 	}
-	t.Stop()
 }
 
 // executeAlterations - Runs all the DNS name alteration methods as goroutines
-func (as *AlterationService) executeAlterations() {
-	req := as.NextRequest()
-	if req == nil {
+func (as *AlterationService) executeAlterations(req *core.AmassRequest) {
+	if !as.Config().IsDomainInScope(req.Name) || !as.correctRecordTypes(req) {
 		return
 	}
 
-	if !as.Config().Alterations {
-		return
-	}
-
-	if !as.Config().IsDomainInScope(req.Name) {
-		return
-	}
-
-	if ok := as.correctRecordTypes(req); !ok {
-		return
-	}
 	as.flipNumbersInName(req)
 	as.appendNumbers(req)
 }

@@ -38,32 +38,15 @@ var Banner string = `
 `
 
 const (
-	Version = "2.6.8"
+	Version = "2.7.2"
 	Author  = "https://github.com/OWASP/Amass"
 
-	DefaultFrequency   = 10 * time.Millisecond
 	defaultWordlistURL = "https://raw.githubusercontent.com/OWASP/Amass/master/wordlists/namelist.txt"
 )
 
-type AmassAddressInfo struct {
-	Address     net.IP
-	Netblock    *net.IPNet
-	ASN         int
-	Description string
-}
-
-type AmassOutput struct {
-	Name      string
-	Domain    string
-	Addresses []AmassAddressInfo
-	Tag       string
-	Source    string
-	Type      int
-}
-
 type Enumeration struct {
 	// The channel that will receive the results
-	Output chan *AmassOutput
+	Output chan *core.AmassOutput
 
 	// Graph built from the data collected
 	Graph *handlers.Graph
@@ -110,9 +93,6 @@ type Enumeration struct {
 	// A blacklist of subdomain names that will not be investigated
 	Blacklist []string
 
-	// Sets the maximum number of DNS queries per minute
-	Frequency time.Duration
-
 	// Preferred DNS resolvers identified by the user
 	Resolvers []string
 
@@ -132,12 +112,11 @@ type Enumeration struct {
 
 func NewEnumeration() *Enumeration {
 	return &Enumeration{
-		Output:          make(chan *AmassOutput, 100),
+		Output:          make(chan *core.AmassOutput, 100),
 		Log:             log.New(ioutil.Discard, "", 0),
 		Ports:           []int{80, 443},
 		Recursive:       true,
 		Alterations:     true,
-		Frequency:       25 * time.Millisecond,
 		MinForRecursive: 1,
 		pause:           make(chan struct{}),
 		resume:          make(chan struct{}),
@@ -164,10 +143,6 @@ func (e *Enumeration) generateAmassConfig() (*core.AmassConfig, error) {
 
 	if e.Passive && e.Active {
 		return nil, errors.New("Active enumeration cannot be performed without DNS resolution")
-	}
-
-	if e.Frequency < DefaultFrequency {
-		return nil, errors.New("The configuration contains a invalid frequency")
 	}
 
 	if e.Passive && e.DataOptsWriter != nil {
@@ -197,7 +172,6 @@ func (e *Enumeration) generateAmassConfig() (*core.AmassConfig, error) {
 		Passive:         e.Passive,
 		Active:          e.Active,
 		Blacklist:       e.Blacklist,
-		Frequency:       e.Frequency,
 		Resolvers:       e.Resolvers,
 		DataOptsWriter:  e.DataOptsWriter,
 	}
@@ -289,7 +263,7 @@ func (e *Enumeration) Resume() {
 	e.resume <- struct{}{}
 }
 
-func (e *Enumeration) sendOutput(out *AmassOutput) {
+func (e *Enumeration) sendOutput(out *core.AmassOutput) {
 	// Check if the output channel has been closed
 	select {
 	case <-e.done:

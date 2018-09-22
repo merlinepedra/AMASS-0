@@ -4,7 +4,6 @@
 package dnssrv
 
 import (
-	"context"
 	"net"
 	"strings"
 	"time"
@@ -13,11 +12,23 @@ import (
 	"github.com/OWASP/Amass/amass/utils"
 	evbus "github.com/asaskevich/EventBus"
 	"github.com/irfansharif/cfilter"
-	"golang.org/x/sync/semaphore"
+	"github.com/miekg/dns"
 )
 
-const (
-	defaultNumOpenFiles int64 = 10000
+var (
+	InitialQueryTypesLen int64 = 4
+	InitialQueryTypes          = []string{
+		"TXT",
+		"A",
+		"AAAA",
+		"CNAME",
+	}
+
+	badSubnets = []string{
+		"198.105.244.0/24",
+		"198.105.254.0/24",
+		"88.204.137.0/24",
+	}
 )
 
 type DNSService struct {
@@ -31,22 +42,20 @@ type DNSService struct {
 	// Data collected about various subdomains
 	subdomains map[string]map[int][]string
 
-	// Enforces a maximum number of DNS queries sent at any given moment
-	sem *semaphore.Weighted
+	cidrBlacklist []*net.IPNet
 }
 
 func NewDNSService(config *core.AmassConfig, bus evbus.Bus) *DNSService {
-	// Obtain the proper weight based on file resource limits
-	weight := (GetFileLimit() / 10) * 9
-	if weight <= 0 {
-		weight = defaultNumOpenFiles
-	}
-
 	ds := &DNSService{
 		bus:        bus,
 		filter:     cfilter.New(),
 		subdomains: make(map[string]map[int][]string),
-		sem:        semaphore.NewWeighted(weight),
+	}
+
+	for _, n := range badSubnets {
+		if _, ipnet, err := net.ParseCIDR(n); err == nil {
+			ds.cidrBlacklist = append(ds.cidrBlacklist, ipnet)
+		}
 	}
 
 	ds.BaseAmassService = *core.NewBaseAmassService("DNS Service", config, ds)
@@ -56,7 +65,7 @@ func NewDNSService(config *core.AmassConfig, bus evbus.Bus) *DNSService {
 func (ds *DNSService) OnStart() error {
 	ds.BaseAmassService.OnStart()
 
-	ds.bus.SubscribeAsync(core.DNSQUERY, ds.SendRequest, false)
+	ds.bus.SubscribeAsync(core.DNSQUERY, ds.queueRequest, false)
 	ds.bus.SubscribeAsync(core.DNSSWEEP, ds.ReverseDNSSweep, false)
 	go ds.processRequests()
 	return nil
@@ -73,27 +82,44 @@ func (ds *DNSService) OnResume() error {
 func (ds *DNSService) OnStop() error {
 	ds.BaseAmassService.OnStop()
 
-	ds.bus.Unsubscribe(core.DNSQUERY, ds.SendRequest)
+	ds.bus.Unsubscribe(core.DNSQUERY, ds.queueRequest)
 	ds.bus.Unsubscribe(core.DNSSWEEP, ds.ReverseDNSSweep)
 	return nil
 }
 
+func (ds *DNSService) queueRequest(req *core.AmassRequest) {
+	if req == nil || req.Name == "" || req.Domain == "" {
+		return
+	}
+	if ds.duplicate(req.Name) || ds.Config().Blacklisted(req.Name) {
+		return
+	}
+	ds.SendRequest(req)
+}
+
 func (ds *DNSService) processRequests() {
-	t := time.NewTicker(ds.Config().Frequency)
-loop:
+	var paused bool
+
 	for {
 		select {
-		case <-t.C:
-			ds.performRequest()
 		case <-ds.PauseChan():
-			t.Stop()
+			paused = true
 		case <-ds.ResumeChan():
-			t = time.NewTicker(ds.Config().Frequency)
+			paused = false
 		case <-ds.Quit():
-			break loop
+			return
+		default:
+			if paused {
+				time.Sleep(time.Second)
+				continue
+			}
+			if req := ds.NextRequest(); req != nil {
+				go ds.performRequest(req)
+			} else {
+				time.Sleep(100 * time.Millisecond)
+			}
 		}
 	}
-	t.Stop()
 }
 
 func (ds *DNSService) duplicate(name string) bool {
@@ -104,41 +130,19 @@ func (ds *DNSService) duplicate(name string) bool {
 	return false
 }
 
-func (ds *DNSService) performRequest() {
-	req := ds.NextRequest()
-	// Plow through the requests that are not of interest
-	for req != nil && (req.Name == "" || req.Domain == "" ||
-		ds.duplicate(req.Name) || ds.Config().Blacklisted(req.Name)) {
-		req = ds.NextRequest()
-	}
-	if req == nil {
-		return
-	}
-
-	ds.sem.Acquire(context.Background(), 6)
-	ds.SetActive()
-	go ds.completeQueries(req)
-}
-
-var InitialQueryTypes = []string{
-	"TXT",
-	"A",
-	"AAAA",
-	"CNAME",
-}
-
-func (ds *DNSService) completeQueries(req *core.AmassRequest) {
-	defer ds.sem.Release(6)
-
+func (ds *DNSService) performRequest(req *core.AmassRequest) {
 	var answers []core.DNSAnswer
+
+	ds.SetActive()
 	for _, t := range InitialQueryTypes {
 		a, err := Resolve(req.Name, t)
 		if err == nil {
-			answers = append(answers, a...)
-			break
+			if ds.goodDNSRecords(a) {
+				answers = append(answers, a...)
+			}
+		} else {
+			ds.Config().Log.Print(err)
 		}
-		ds.Config().Log.Print(err)
-		time.Sleep(ds.Config().Frequency)
 	}
 
 	req.Records = answers
@@ -151,6 +155,21 @@ func (ds *DNSService) completeQueries(req *core.AmassRequest) {
 	// Make sure we know about any new subdomains
 	ds.checkForNewSubdomain(req)
 	ds.bus.Publish(core.RESOLVED, req)
+}
+
+func (ds *DNSService) goodDNSRecords(records []core.DNSAnswer) bool {
+	for _, r := range records {
+		if r.Type != int(dns.TypeA) {
+			continue
+		}
+
+		for _, cidr := range ds.cidrBlacklist {
+			if cidr.Contains(net.ParseIP(r.Data)) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (ds *DNSService) checkForNewSubdomain(req *core.AmassRequest) {
@@ -245,7 +264,7 @@ func (ds *DNSService) attemptZoneXFR(domain, sub, server string) {
 				Name:   name,
 				Domain: domain,
 				Tag:    "axfr",
-				Source: "DNS ZoneXFR",
+				Source: "DNS Zone XFR",
 			})
 		}
 	} else {
@@ -271,7 +290,6 @@ func (ds *DNSService) queryServiceNames(subdomain, domain string) {
 				Source:  "Forward DNS",
 			})
 		}
-		time.Sleep(ds.Config().Frequency)
 	}
 }
 
@@ -287,13 +305,11 @@ func (ds *DNSService) ReverseDNSSweep(domain, addr string, cidr *net.IPNet) {
 
 	for _, ip := range ips {
 		a := ip.String()
-
 		if ds.duplicate(a) {
 			continue
 		}
 
-		ptrName, answer, err := Reverse(a)
-		if err == nil {
+		if ptrName, answer, err := Reverse(a); err == nil {
 			ds.bus.Publish(core.RESOLVED, &core.AmassRequest{
 				Name:   ptrName,
 				Domain: domain,
@@ -307,6 +323,5 @@ func (ds *DNSService) ReverseDNSSweep(domain, addr string, cidr *net.IPNet) {
 				Source: "Reverse DNS",
 			})
 		}
-		time.Sleep(ds.Config().Frequency)
 	}
 }

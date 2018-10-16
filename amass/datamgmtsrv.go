@@ -178,13 +178,15 @@ func (dms *DataManagerService) insertDomain(domain string) {
 	}
 
 	for _, handler := range dms.Handlers {
-		handler.InsertDomain(domain, "dns", "Forward DNS")
+		if err := handler.InsertDomain(domain, core.DNS, "Forward DNS"); err != nil {
+			dms.Config().Log.Printf("%s failed to insert domain: %v", handler, err)
+		}
 	}
 
-	dms.bus.Publish(core.DNSQUERY, &core.AmassRequest{
+	dms.bus.Publish(core.NEWNAME, &core.AmassRequest{
 		Name:   domain,
 		Domain: domain,
-		Tag:    "dns",
+		Tag:    core.DNS,
 		Source: "Forward DNS",
 	})
 
@@ -212,13 +214,16 @@ func (dms *DataManagerService) insertCNAME(req *core.AmassRequest, recidx int) {
 
 	dms.insertDomain(domain)
 	for _, handler := range dms.Handlers {
-		handler.InsertCNAME(req.Name, req.Domain, target, domain, req.Tag, req.Source)
+		err := handler.InsertCNAME(req.Name, req.Domain, target, domain, req.Tag, req.Source)
+		if err != nil {
+			dms.Config().Log.Printf("%s failed to insert CNAME: %v", handler, err)
+		}
 	}
 
-	dms.bus.Publish(core.DNSQUERY, &core.AmassRequest{
+	dms.bus.Publish(core.NEWNAME, &core.AmassRequest{
 		Name:   target,
 		Domain: domain,
-		Tag:    "dns",
+		Tag:    core.DNS,
 		Source: "Forward DNS",
 	})
 }
@@ -230,7 +235,9 @@ func (dms *DataManagerService) insertA(req *core.AmassRequest, recidx int) {
 	}
 
 	for _, handler := range dms.Handlers {
-		handler.InsertA(req.Name, req.Domain, addr, req.Tag, req.Source)
+		if err := handler.InsertA(req.Name, req.Domain, addr, req.Tag, req.Source); err != nil {
+			dms.Config().Log.Printf("%s failed to insert A record: %v", handler, err)
+		}
 	}
 
 	dms.insertInfrastructure(addr)
@@ -253,7 +260,9 @@ func (dms *DataManagerService) insertAAAA(req *core.AmassRequest, recidx int) {
 	}
 
 	for _, handler := range dms.Handlers {
-		handler.InsertAAAA(req.Name, req.Domain, addr, req.Tag, req.Source)
+		if err := handler.InsertAAAA(req.Name, req.Domain, addr, req.Tag, req.Source); err != nil {
+			dms.Config().Log.Printf("%s failed to insert AAAA record: %v", handler, err)
+		}
 	}
 
 	dms.insertInfrastructure(addr)
@@ -272,7 +281,7 @@ func (dms *DataManagerService) insertAAAA(req *core.AmassRequest, recidx int) {
 func (dms *DataManagerService) obtainNamesFromCertificate(addr string) {
 	for _, r := range PullCertificateNames(addr, dms.Config().Ports) {
 		if dms.Config().IsDomainInScope(r.Domain) {
-			dms.bus.Publish(core.DNSQUERY, r)
+			dms.bus.Publish(core.NEWNAME, r)
 		}
 	}
 }
@@ -286,13 +295,15 @@ func (dms *DataManagerService) insertPTR(req *core.AmassRequest, recidx int) {
 
 	dms.insertDomain(domain)
 	for _, handler := range dms.Handlers {
-		handler.InsertPTR(req.Name, domain, target, req.Tag, req.Source)
+		if err := handler.InsertPTR(req.Name, domain, target, req.Tag, req.Source); err != nil {
+			dms.Config().Log.Printf("%s failed to insert PTR record: %v", handler, err)
+		}
 	}
 
-	dms.bus.Publish(core.DNSQUERY, &core.AmassRequest{
+	dms.bus.Publish(core.NEWNAME, &core.AmassRequest{
 		Name:   target,
 		Domain: domain,
-		Tag:    "dns",
+		Tag:    core.DNS,
 		Source: "Reverse DNS",
 	})
 }
@@ -305,7 +316,10 @@ func (dms *DataManagerService) insertSRV(req *core.AmassRequest, recidx int) {
 	}
 
 	for _, handler := range dms.Handlers {
-		handler.InsertSRV(req.Name, req.Domain, service, target, req.Tag, req.Source)
+		err := handler.InsertSRV(req.Name, req.Domain, service, target, req.Tag, req.Source)
+		if err != nil {
+			dms.Config().Log.Printf("%s failed to insert SRV record: %v", handler, err)
+		}
 	}
 }
 
@@ -319,14 +333,17 @@ func (dms *DataManagerService) insertNS(req *core.AmassRequest, recidx int) {
 
 	dms.insertDomain(domain)
 	for _, handler := range dms.Handlers {
-		handler.InsertNS(req.Name, req.Domain, target, domain, req.Tag, req.Source)
+		err := handler.InsertNS(req.Name, req.Domain, target, domain, req.Tag, req.Source)
+		if err != nil {
+			dms.Config().Log.Printf("%s failed to insert NS record: %v", handler, err)
+		}
 	}
 
 	if target != domain {
-		dms.bus.Publish(core.DNSQUERY, &core.AmassRequest{
+		dms.bus.Publish(core.NEWNAME, &core.AmassRequest{
 			Name:   target,
 			Domain: domain,
-			Tag:    "dns",
+			Tag:    core.DNS,
 			Source: "Forward DNS",
 		})
 	}
@@ -341,14 +358,17 @@ func (dms *DataManagerService) insertMX(req *core.AmassRequest, recidx int) {
 
 	dms.insertDomain(domain)
 	for _, handler := range dms.Handlers {
-		handler.InsertMX(req.Name, req.Domain, target, domain, req.Tag, req.Source)
+		err := handler.InsertMX(req.Name, req.Domain, target, domain, req.Tag, req.Source)
+		if err != nil {
+			dms.Config().Log.Printf("%s failed to insert MX record: %v", handler, err)
+		}
 	}
 
 	if target != domain {
-		dms.bus.Publish(core.DNSQUERY, &core.AmassRequest{
+		dms.bus.Publish(core.NEWNAME, &core.AmassRequest{
 			Name:   target,
 			Domain: domain,
-			Tag:    "dns",
+			Tag:    core.DNS,
 			Source: "Forward DNS",
 		})
 	}
@@ -364,10 +384,10 @@ func (dms *DataManagerService) insertTXT(req *core.AmassRequest, recidx int) {
 	}
 	txt := req.Records[recidx].Data
 	for _, name := range re.FindAllString(txt, -1) {
-		dms.bus.Publish(core.DNSQUERY, &core.AmassRequest{
+		dms.bus.Publish(core.NEWNAME, &core.AmassRequest{
 			Name:   name,
 			Domain: req.Domain,
-			Tag:    "dns",
+			Tag:    core.DNS,
 			Source: "Forward DNS",
 		})
 	}
@@ -381,7 +401,9 @@ func (dms *DataManagerService) insertInfrastructure(addr string) {
 	}
 
 	for _, handler := range dms.Handlers {
-		handler.InsertInfrastructure(addr, asn, cidr, desc)
+		if err := handler.InsertInfrastructure(addr, asn, cidr, desc); err != nil {
+			dms.Config().Log.Printf("%s failed to insert infrastructure data: %v", handler, err)
+		}
 	}
 }
 

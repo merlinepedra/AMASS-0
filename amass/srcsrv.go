@@ -10,6 +10,7 @@ import (
 
 	"github.com/OWASP/Amass/amass/core"
 	"github.com/OWASP/Amass/amass/sources"
+	"github.com/OWASP/Amass/amass/utils"
 	evbus "github.com/asaskevich/EventBus"
 )
 
@@ -40,17 +41,15 @@ func NewSourcesService(config *core.AmassConfig, bus evbus.Bus) *SourcesService 
 		outFilter:    make(map[string]struct{}),
 		domainFilter: make(map[string]struct{}),
 	}
+	ss.BaseAmassService = *core.NewBaseAmassService("Sources Service", config, ss)
 
-	for _, source := range sources.GetAllSources() {
+	for _, source := range sources.GetAllSources(ss) {
 		if source.Type() == core.ARCHIVE {
-			//ss.throttles = append(ss.throttles, source)
+			ss.throttles = append(ss.throttles, source)
 		} else {
 			ss.directs = append(ss.directs, source)
 		}
-		source.SetLogger(config.Log)
 	}
-
-	ss.BaseAmassService = *core.NewBaseAmassService("Sources Service", config, ss)
 	return ss
 }
 
@@ -127,7 +126,6 @@ func (ss *SourcesService) handleRequest(req *core.AmassRequest) {
 		if subsrch && !source.Subdomains() {
 			continue
 		}
-		ss.SetActive()
 		ss.throttleAdd(source, req.Domain, req.Name)
 	}
 }
@@ -159,18 +157,8 @@ func (ss *SourcesService) handleOutput(req *core.AmassRequest) {
 	if ss.outDup(req.Name) {
 		return
 	}
-
 	ss.SetActive()
-	if ss.Config().Passive {
-		ss.bus.Publish(core.OUTPUT, &core.AmassOutput{
-			Name:   req.Name,
-			Domain: req.Domain,
-			Tag:    req.Tag,
-			Source: req.Source,
-		})
-	} else {
-		ss.bus.Publish(core.DNSQUERY, req)
-	}
+	ss.bus.Publish(core.NEWNAME, req)
 	ss.SendRequest(req)
 }
 
@@ -250,37 +238,33 @@ func (ss *SourcesService) throttleNext() *entry {
 	return e
 }
 
-const MAX_THROTTLED int = 20
-
 func (ss *SourcesService) processThrottleQueue() {
-	var running int
-	done := make(chan struct{}, MAX_THROTTLED)
+	max := utils.NewSemaphore(20)
+	done := make(chan struct{}, 20)
 
 	t := time.NewTicker(100 * time.Millisecond)
 	defer t.Stop()
-loop:
 	for {
 		select {
 		case <-t.C:
-			if running >= MAX_THROTTLED {
+			if !max.TryAcquire(1) {
 				continue
-			}
-
-			if th := ss.throttleNext(); th != nil {
-				running++
+			} else if th := ss.throttleNext(); th != nil {
 				go func() {
 					ss.queryOneSource(th.Source, th.Domain, th.Sub)
 					done <- struct{}{}
 				}()
+			} else {
+				max.Release(1)
 			}
 		case <-done:
-			running--
+			max.Release(1)
 		case <-ss.PauseChan():
 			t.Stop()
 		case <-ss.ResumeChan():
 			t = time.NewTicker(100 * time.Millisecond)
 		case <-ss.Quit():
-			break loop
+			return
 		}
 	}
 }

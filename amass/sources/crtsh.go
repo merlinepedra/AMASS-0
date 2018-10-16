@@ -4,22 +4,27 @@
 package sources
 
 import (
-	"fmt"
 	"regexp"
 	"strings"
 	"time"
 
+	"github.com/OWASP/Amass/amass/core"
 	"github.com/OWASP/Amass/amass/utils"
 )
 
+const MAXCRTConns int = 10
+
 type Crtsh struct {
 	BaseDataSource
+	MaxRequests *utils.Semaphore
 }
 
-func NewCrtsh() DataSource {
-	c := new(Crtsh)
+func NewCrtsh(srv core.AmassService) DataSource {
+	c := &Crtsh{
+		MaxRequests: utils.NewSemaphore(MAXCRTConns),
+	}
 
-	c.BaseDataSource = *NewBaseDataSource(CERT, "crt.sh")
+	c.BaseDataSource = *NewBaseDataSource(srv, core.CERT, "crt.sh")
 	return c
 }
 
@@ -29,31 +34,57 @@ func (c *Crtsh) Query(domain, sub string) []string {
 	if domain != sub {
 		return unique
 	}
-
 	// Pull the page that lists all certs for this domain
 	url := "https://crt.sh/?q=%25." + domain
 	page, err := utils.GetWebPage(url, nil)
 	if err != nil {
-		c.log(fmt.Sprintf("%s: %v", url, err))
+		c.Service.Config().Log.Printf("%s: %v", url, err)
 		return unique
 	}
+	c.Service.SetActive()
 	// Get the subdomain name the cert was issued to, and
 	// the Subject Alternative Name list from each cert
+	var idx int
+	names := make(chan []string, MAXCRTConns)
 	results := c.getSubmatches(page)
-	for _, rel := range results {
-		// Do not go too fast
-		time.Sleep(50 * time.Millisecond)
-		// Pull the certificate web page
-		url = "https://crt.sh/" + rel
-		cert, err := utils.GetWebPage(url, nil)
-		if err != nil {
-			c.log(fmt.Sprintf("%s: %v", url, err))
-			continue
+	t := time.NewTicker(100 * time.Millisecond)
+	defer t.Stop()
+loop:
+	for {
+		c.Service.SetActive()
+
+		select {
+		case <-c.Service.Quit():
+			break loop
+		case res := <-names:
+			if len(res) > 0 {
+				unique = utils.UniqueAppend(unique, res...)
+			}
+			c.MaxRequests.Release(1)
+		case <-t.C:
+			if idx >= len(results) {
+				if c.MaxRequests.TryAcquire(MAXCRTConns) {
+					break loop
+				}
+			} else if c.MaxRequests.TryAcquire(1) {
+				go c.GetRoutine(results[idx], domain, names)
+				idx++
+			}
 		}
-		// Get all names off the certificate
-		unique = utils.UniqueAppend(unique, c.getMatches(cert, domain)...)
 	}
 	return unique
+}
+
+func (c *Crtsh) GetRoutine(id, domain string, names chan []string) {
+	url := "https://crt.sh/" + id
+	cert, err := utils.GetWebPage(url, nil)
+	if err != nil {
+		c.Service.Config().Log.Printf("%s: %v", url, err)
+		names <- []string{}
+		return
+	}
+	// Get all names off the certificate
+	names <- c.getMatches(cert, domain)
 }
 
 func (c *Crtsh) getMatches(content, domain string) []string {
@@ -71,7 +102,7 @@ func (c *Crtsh) getSubmatches(content string) []string {
 
 	re := regexp.MustCompile("<TD style=\"text-align:center\"><A href=\"([?]id=[a-zA-Z0-9]*)\">[a-zA-Z0-9]*</A></TD>")
 	for _, subs := range re.FindAllStringSubmatch(content, -1) {
-		results = append(results, strings.TrimSpace(subs[1]))
+		results = utils.UniqueAppend(results, strings.TrimSpace(subs[1]))
 	}
 	return results
 }

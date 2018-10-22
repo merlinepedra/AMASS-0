@@ -17,7 +17,7 @@ const (
 	ldhChars = "abcdefghijklmnopqrstuvwxyz0123456789-"
 )
 
-// DetectWildcard - Checks subdomains in the wildcard cache for matches on the IP address
+// HasWildcard checks subdomains for a DNS wildcard
 func HasWildcard(domain, subdomain string) bool {
 	base := len(strings.Split(domain, "."))
 	labels := strings.Split(subdomain, ".")
@@ -60,7 +60,7 @@ func wildcardTestResolution(sub string) []core.DNSAnswer {
 		return nil
 	}
 	// Check if the name resolves
-	MaxConnections.Acquire(3)
+	core.MaxConnections.Acquire(3)
 	if a, err := Resolve(name, "CNAME"); err == nil {
 		answers = append(answers, a...)
 	}
@@ -70,7 +70,7 @@ func wildcardTestResolution(sub string) []core.DNSAnswer {
 	if a, err := Resolve(name, "AAAA"); err == nil {
 		answers = append(answers, a...)
 	}
-	MaxConnections.Release(3)
+	core.MaxConnections.Release(3)
 
 	if len(answers) == 0 {
 		return nil
@@ -78,6 +78,7 @@ func wildcardTestResolution(sub string) []core.DNSAnswer {
 	return answers
 }
 
+// UnlikelyName takes a subdomain name and returns an unlikely DNS name within that subdomain
 func UnlikelyName(sub string) string {
 	var newlabel string
 	ldh := []rune(ldhChars)

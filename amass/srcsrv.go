@@ -12,6 +12,7 @@ import (
 	"github.com/OWASP/Amass/amass/sources"
 	"github.com/OWASP/Amass/amass/utils"
 	evbus "github.com/asaskevich/EventBus"
+	"github.com/irfansharif/cfilter"
 )
 
 type entry struct {
@@ -20,6 +21,8 @@ type entry struct {
 	Sub    string
 }
 
+// SourcesService is the AmassService that handles the querying of all data sources
+// within the architecture. This is achieved by receiving all the RESOLVED events.
 type SourcesService struct {
 	core.BaseAmassService
 
@@ -28,17 +31,17 @@ type SourcesService struct {
 	directs       []sources.DataSource
 	throttles     []sources.DataSource
 	throttleQueue []*entry
-	inFilter      map[string]struct{}
-	outFilter     map[string]struct{}
+	filter        *cfilter.CFilter
 	domainFilter  map[string]struct{}
 }
 
+// NewSourcesService requires the enumeration configuration and event bus as parameters.
+// The object returned is initialized, but has not yet been started.
 func NewSourcesService(config *core.AmassConfig, bus evbus.Bus) *SourcesService {
 	ss := &SourcesService{
 		bus:          bus,
 		responses:    make(chan *core.AmassRequest, 50),
-		inFilter:     make(map[string]struct{}),
-		outFilter:    make(map[string]struct{}),
+		filter:       cfilter.New(),
 		domainFilter: make(map[string]struct{}),
 	}
 	ss.BaseAmassService = *core.NewBaseAmassService("Sources Service", config, ss)
@@ -53,6 +56,7 @@ func NewSourcesService(config *core.AmassConfig, bus evbus.Bus) *SourcesService 
 	return ss
 }
 
+// OnStart implements the AmassService interface
 func (ss *SourcesService) OnStart() error {
 	ss.BaseAmassService.OnStart()
 
@@ -64,14 +68,7 @@ func (ss *SourcesService) OnStart() error {
 	return nil
 }
 
-func (ss *SourcesService) OnPause() error {
-	return nil
-}
-
-func (ss *SourcesService) OnResume() error {
-	return nil
-}
-
+// OnStop implements the AmassService interface
 func (ss *SourcesService) OnStop() error {
 	ss.BaseAmassService.OnStop()
 
@@ -100,7 +97,7 @@ loop:
 }
 
 func (ss *SourcesService) handleRequest(req *core.AmassRequest) {
-	if ss.inDup(req.Name) || !ss.Config().IsDomainInScope(req.Name) {
+	if ss.duplicate(req.Name) || !ss.Config().IsDomainInScope(req.Name) {
 		return
 	}
 
@@ -154,33 +151,15 @@ func (ss *SourcesService) handleOutput(req *core.AmassRequest) {
 		req.Name = req.Name[1:]
 	}
 
-	if ss.outDup(req.Name) {
-		return
-	}
-	ss.SetActive()
 	ss.bus.Publish(core.NEWNAME, req)
 	ss.SendRequest(req)
 }
 
-func (ss *SourcesService) inDup(sub string) bool {
-	ss.Lock()
-	defer ss.Unlock()
-
-	if _, found := ss.inFilter[sub]; found {
+func (ss *SourcesService) duplicate(name string) bool {
+	if ss.filter.Lookup([]byte(name)) {
 		return true
 	}
-	ss.inFilter[sub] = struct{}{}
-	return false
-}
-
-func (ss *SourcesService) outDup(sub string) bool {
-	ss.Lock()
-	defer ss.Unlock()
-
-	if _, found := ss.outFilter[sub]; found {
-		return true
-	}
-	ss.outFilter[sub] = struct{}{}
+	ss.filter.Insert([]byte(name))
 	return false
 }
 

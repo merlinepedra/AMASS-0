@@ -18,7 +18,7 @@ import (
 
 var (
 	// Public & free DNS servers
-	PublicResolvers = []string{
+	publicResolvers = []string{
 		"1.1.1.1:53",     // Cloudflare
 		"8.8.8.8:53",     // Google
 		"64.6.64.6:53",   // Verisign
@@ -29,22 +29,16 @@ var (
 		"77.88.8.1:53",   // Yandex.DNS Secondary
 	}
 
-	Resolvers []*Resolver
-
-	NumOfFileDescriptors int
-	MaxConnections       *utils.Semaphore
+	resolvers []*resolver
 )
 
 func init() {
-	NumOfFileDescriptors = (GetFileLimit() / 10) * 9
-	MaxConnections = utils.NewSemaphore(NumOfFileDescriptors)
-
-	for _, addr := range PublicResolvers {
-		Resolvers = append(Resolvers, NewResolver(addr))
+	for _, addr := range publicResolvers {
+		resolvers = append(resolvers, newResolver(addr))
 	}
 }
 
-type Resolver struct {
+type resolver struct {
 	Address        string
 	MaxResolutions *utils.Semaphore
 	ExchangeTimes  chan time.Time
@@ -53,57 +47,57 @@ type Resolver struct {
 	done           chan struct{}
 }
 
-func NewResolver(addr string) *Resolver {
-	r := &Resolver{
+func newResolver(addr string) *resolver {
+	r := &resolver{
 		Address:        addr,
-		MaxResolutions: utils.NewSemaphore(NumOfFileDescriptors),
-		ExchangeTimes:  make(chan time.Time, int(float32(NumOfFileDescriptors)*1.5)),
-		ErrorTimes:     make(chan time.Time, int(float32(NumOfFileDescriptors)*1.5)),
+		MaxResolutions: utils.NewSemaphore(core.NumOfFileDescriptors),
+		ExchangeTimes:  make(chan time.Time, int(float32(core.NumOfFileDescriptors)*1.5)),
+		ErrorTimes:     make(chan time.Time, int(float32(core.NumOfFileDescriptors)*1.5)),
 		WindowDuration: time.Second,
 		done:           make(chan struct{}),
 	}
-	go r.MonitorPerformance()
+	go r.monitorPerformance()
 	return r
 }
 
-func (r *Resolver) Stop() {
+func (r *resolver) stop() {
 	close(r.done)
 }
 
-func (r *Resolver) Resolve(name string, qtype uint16) ([]core.DNSAnswer, error, bool) {
+func (r *resolver) resolve(name string, qtype uint16) ([]core.DNSAnswer, bool, error) {
 	defer r.MaxResolutions.Release(1)
 
 	d := &net.Dialer{}
 	conn, err := d.Dial("udp", r.Address)
 	if err != nil {
-		return []core.DNSAnswer{}, err, false
+		return []core.DNSAnswer{}, false, err
 	}
 	defer conn.Close()
 
-	return r.ExchangeConn(conn, name, qtype)
+	return r.exchangeConn(conn, name, qtype)
 }
 
-// ExchangeConn - Encapsulates miekg/dns usage
-func (r *Resolver) ExchangeConn(conn net.Conn, name string, qtype uint16) ([]core.DNSAnswer, error, bool) {
+// exchangeConn encapsulates miekg/dns usage
+func (r *resolver) exchangeConn(conn net.Conn, name string, qtype uint16) ([]core.DNSAnswer, bool, error) {
 	var err error
 	var rd *dns.Msg
 	var answers []core.DNSAnswer
 
 	co := &dns.Conn{Conn: conn}
-	msg := QueryMessage(name, qtype)
+	msg := queryMessage(name, qtype)
 	r.ExchangeTimes <- time.Now()
 
 	co.SetWriteDeadline(time.Now().Add(r.WindowDuration))
 	if err = co.WriteMsg(msg); err != nil {
 		r.ErrorTimes <- time.Now()
-		return nil, fmt.Errorf("DNS error: Failed to write query msg: %v", err), true
+		return nil, true, fmt.Errorf("DNS error: Failed to write query msg: %v", err)
 	}
 
 	co.SetReadDeadline(time.Now().Add(r.WindowDuration))
 	rd, err = co.ReadMsg()
 	if err != nil {
 		r.ErrorTimes <- time.Now()
-		return nil, fmt.Errorf("DNS error: Failed to read query response: %v", err), true
+		return nil, true, fmt.Errorf("DNS error: Failed to read query response: %v", err)
 	}
 	// Check that the query was successful
 	if r != nil && rd.Rcode != dns.RcodeSuccess {
@@ -111,10 +105,10 @@ func (r *Resolver) ExchangeConn(conn net.Conn, name string, qtype uint16) ([]cor
 		if rd.Rcode == 3 {
 			again = false
 		}
-		return nil, fmt.Errorf("DNS query for %s, type %d returned error %d", name, qtype, rd.Rcode), again
+		return nil, again, fmt.Errorf("DNS query for %s, type %d returned error %d", name, qtype, rd.Rcode)
 	}
 
-	for _, a := range ExtractRawData(rd, qtype) {
+	for _, a := range extractRawData(rd, qtype) {
 		answers = append(answers, core.DNSAnswer{
 			Name: name,
 			Type: int(qtype),
@@ -124,20 +118,20 @@ func (r *Resolver) ExchangeConn(conn net.Conn, name string, qtype uint16) ([]cor
 	}
 
 	if len(answers) == 0 {
-		return nil, fmt.Errorf("DNS query for %s, type %d returned 0 records", name, qtype), false
+		return nil, false, fmt.Errorf("DNS query for %s, type %d returned 0 records", name, qtype)
 	}
-	return answers, nil, false
+	return answers, false, nil
 }
 
-func (r *Resolver) MonitorPerformance() {
+func (r *resolver) monitorPerformance() {
 	var count int
 	var xchgWin, errWin []time.Time
 
 	last := time.Now()
 	// Start off with a reasonable load to the
 	// network, and adjust based on performance
-	if NumOfFileDescriptors > 256 {
-		count = NumOfFileDescriptors - 256
+	if core.NumOfFileDescriptors > 256 {
+		count = core.NumOfFileDescriptors - 256
 		r.MaxResolutions.Acquire(count)
 	}
 
@@ -158,16 +152,15 @@ loop:
 			if total < 1000 {
 				continue
 			}
-
-			failures := numInWindow(last, end, errWin)
 			// Check if we must reduce the number of simultaneous connections
-			potential := NumOfFileDescriptors - count
+			failures := numInWindow(last, end, errWin)
+			potential := core.NumOfFileDescriptors - count
 			delta := 16
-			alt := (NumOfFileDescriptors - count) / 10
+			alt := (core.NumOfFileDescriptors - count) / 10
 			if alt > delta {
 				delta = alt
 			}
-			// Reduce if 10 percent or more of the connections timeout
+			// Reduce if the percentage of timed out connections is too high
 			if result := analyzeConnResults(total, failures); result == 1 {
 				count -= delta
 				r.MaxResolutions.Release(delta)
@@ -194,9 +187,9 @@ func analyzeConnResults(total, failures int) int {
 	}
 
 	percent := 100 / frac
-	if percent >= 5 {
+	if percent >= 2 {
 		return -1
-	} else if percent < 5 {
+	} else if percent < 2 {
 		return 1
 	}
 	return 0
@@ -214,11 +207,11 @@ func numInWindow(x, y time.Time, s []time.Time) int {
 	return count
 }
 
-// NextResolverAddress - Requests the next server
-func NextResolver() *Resolver {
+// nextResolver requests the next DNS resolution server
+func nextResolver() *resolver {
 	for {
 		rnd := rand.Int()
-		r := Resolvers[rnd%len(Resolvers)]
+		r := resolvers[rnd%len(resolvers)]
 
 		if r.MaxResolutions.TryAcquire(1) {
 			return r
@@ -226,17 +219,18 @@ func NextResolver() *Resolver {
 	}
 }
 
-func SetCustomResolvers(resolvers []string) {
-	if len(resolvers) <= 0 {
+// SetCustomResolvers modifies the set of resolvers used during enumeration
+func SetCustomResolvers(res []string) {
+	if len(res) <= 0 {
 		return
 	}
 
-	for _, r := range Resolvers {
-		r.Stop()
-	}
-	Resolvers = []*Resolver{}
-
 	for _, r := range resolvers {
+		r.stop()
+	}
+	resolvers = []*resolver{}
+
+	for _, r := range res {
 		addr := r
 
 		parts := strings.Split(addr, ":")
@@ -244,10 +238,11 @@ func SetCustomResolvers(resolvers []string) {
 			addr += ":53"
 		}
 
-		Resolvers = append(Resolvers, NewResolver(addr))
+		resolvers = append(resolvers, newResolver(addr))
 	}
 }
 
+// Resolve allows all components to make DNS requests without using the DNSService object
 func Resolve(name, qtype string) ([]core.DNSAnswer, error) {
 	qt, err := textToTypeNum(qtype)
 	if err != nil {
@@ -264,9 +259,9 @@ func Resolve(name, qtype string) ([]core.DNSAnswer, error) {
 	var again bool
 	var ans []core.DNSAnswer
 	for i := 0; i < tries; i++ {
-		r := NextResolver()
+		r := nextResolver()
 
-		ans, err, again = r.Resolve(name, qt)
+		ans, again, err = r.resolve(name, qt)
 		if !again {
 			break
 		}
@@ -275,6 +270,7 @@ func Resolve(name, qtype string) ([]core.DNSAnswer, error) {
 	return ans, err
 }
 
+// Reverse is performs reverse DNS queries without using the DNSService object
 func Reverse(addr string) (string, string, error) {
 	var name, ptr string
 
@@ -307,7 +303,7 @@ func Reverse(addr string) (string, string, error) {
 	return ptr, name, err
 }
 
-func QueryMessage(name string, qtype uint16) *dns.Msg {
+func queryMessage(name string, qtype uint16) *dns.Msg {
 	m := &dns.Msg{
 		MsgHdr: dns.MsgHdr{
 			Authoritative:     false,
@@ -348,6 +344,8 @@ func setupOptions() *dns.OPT {
 	}
 }
 
+// ZoneTransfer attempts a DNS zone transfer using the server identified in the parameters.
+// The returned slice contains all the names discovered from the zone transfer
 func ZoneTransfer(domain, sub, server string) ([]string, error) {
 	var results []string
 
@@ -464,7 +462,7 @@ func textToTypeNum(text string) (uint16, error) {
 	return qtype, nil
 }
 
-func ExtractRawData(msg *dns.Msg, qtype uint16) []string {
+func extractRawData(msg *dns.Msg, qtype uint16) []string {
 	var data []string
 
 	for _, a := range msg.Answer {

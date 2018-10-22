@@ -19,11 +19,11 @@ import (
 )
 
 const (
-	defaultTLSConnectTimeout = 1 * time.Second
-	defaultHandshakeDeadline = 3 * time.Second
+	defaultTLSConnectTimeout = 3 * time.Second
+	defaultHandshakeDeadline = 10 * time.Second
 )
 
-// pullCertificate - Attempts to pull a cert from several ports on an IP
+// PullCertificateNames attempts to pull a cert from one or more ports on an IP.
 func PullCertificateNames(addr string, ports []int) []*core.AmassRequest {
 	var requests []*core.AmassRequest
 

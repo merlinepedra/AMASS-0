@@ -6,6 +6,8 @@ package utils
 import (
 	"regexp"
 	"strings"
+
+	"github.com/irfansharif/cfilter"
 )
 
 const (
@@ -15,56 +17,51 @@ const (
 	SUBRE = "(([_a-zA-Z0-9]{1}|[a-zA-Z0-9]{1}[a-zA-Z0-9-]{0,61}[a-zA-Z0-9]{1})[.]{1})+"
 )
 
-// Semaphore implements a synchronization object
-// type capable of being a counting semaphore.
-type Semaphore struct {
-	c chan struct{}
+type filterRequest struct {
+	String string
+	Result chan bool
 }
 
-// NewSemaphore returns a Semaphore initialized to max resource counts.
-func NewSemaphore(max int) *Semaphore {
-	sem := &Semaphore{
-		c: make(chan struct{}, max),
-	}
-
-	for i := 0; i < max; i++ {
-		sem.c <- struct{}{}
-	}
-	return sem
+// StringFilter implements an object that performs filtering of strings
+// to ensure that only unique items get through the filter.
+type StringFilter struct {
+	filter   *cfilter.CFilter
+	requests chan filterRequest
+	quit     chan struct{}
 }
 
-// Acquire blocks until num resource counts have been obtained.
-func (s *Semaphore) Acquire(num int) {
-	for i := 0; i < num; i++ {
-		<-s.c
+// NewStringFilter returns an initialized NameFilter.
+func NewStringFilter() *StringFilter {
+	sf := &StringFilter{
+		filter:   cfilter.New(),
+		requests: make(chan filterRequest),
+		quit:     make(chan struct{}),
 	}
+	go sf.processRequests()
+	return sf
 }
 
-// TryAcquire attempts to obtain num resource counts without blocking.
-// The method returns true when successful in acquiring the resource counts.
-func (s *Semaphore) TryAcquire(num int) bool {
-	var count int
-loop:
-	for i := 0; i < num; i++ {
+// Duplicate checks if the name provided has been seen before by this filter.
+func (sf *StringFilter) Duplicate(s string) bool {
+	result := make(chan bool)
+
+	sf.requests <- filterRequest{String: s, Result: result}
+	return <-result
+}
+
+func (sf *StringFilter) processRequests() {
+	for {
 		select {
-		case <-s.c:
-			count++
-		default:
-			break loop
+		case <-sf.quit:
+			return
+		case r := <-sf.requests:
+			if sf.filter.Lookup([]byte(r.String)) {
+				r.Result <- true
+			} else {
+				sf.filter.Insert([]byte(r.String))
+				r.Result <- false
+			}
 		}
-	}
-
-	if count == num {
-		return true
-	}
-	s.Release(count)
-	return false
-}
-
-// Release causes num resource counts to be released.
-func (s *Semaphore) Release(num int) {
-	for i := 0; i < num; i++ {
-		s.c <- struct{}{}
 	}
 }
 
@@ -125,4 +122,21 @@ func CopyString(src string) string {
 
 	copy(str, src)
 	return string(str)
+}
+
+// RemoveAsteriskLabel returns the provided DNS name with all asterisk labels removed.
+func RemoveAsteriskLabel(s string) string {
+	var index int
+
+	labels := strings.Split(s, ".")
+	for i := len(labels) - 1; i >= 0; i-- {
+		if strings.TrimSpace(labels[i]) == "*" {
+			break
+		}
+		index = i
+	}
+	if index == len(labels)-1 {
+		return ""
+	}
+	return strings.Join(labels[index:], ".")
 }

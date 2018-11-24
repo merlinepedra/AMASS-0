@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 
+	"github.com/OWASP/Amass/amass"
 	"github.com/OWASP/Amass/amass/handlers"
 	"github.com/OWASP/Amass/amass/utils/viz"
 )
@@ -16,6 +17,7 @@ import (
 var (
 	help           = flag.Bool("h", false, "Show the program usage message")
 	input          = flag.String("i", "", "The Amass data operations JSON file")
+	maltegopath    = flag.String("maltego", "", "Path to the Maltego csv file")
 	visjspath      = flag.String("visjs", "", "Path to the Visjs output HTML file")
 	graphistrypath = flag.String("graphistry", "", "Path to the Graphistry JSON file")
 	gexfpath       = flag.String("gexf", "", "Path to the Gephi Graph Exchange XML Format (GEXF) file")
@@ -26,7 +28,7 @@ func main() {
 	flag.Parse()
 
 	if *help {
-		fmt.Printf("Usage: %s -i infile --visjs of1 --gexf of2 --d3 of3 --graphistry of4\n", path.Base(os.Args[0]))
+		fmt.Printf("Usage: %s -i infile --maltego of1 --visjs of2 --gexf of3 --d3 of4 --graphistry of5\n", path.Base(os.Args[0]))
 		flag.PrintDefaults()
 		return
 	}
@@ -48,7 +50,7 @@ func main() {
 		return
 	}
 
-	graph := handlers.NewGraph()
+	graph := amass.NewGraph()
 	err = handlers.DataOptsDriver(opts, graph)
 	if err != nil {
 		fmt.Printf("Failed to build the network graph: %v\n", err)
@@ -56,13 +58,14 @@ func main() {
 	}
 
 	nodes, edges := graph.VizData()
-	WriteVisjsFile(*visjspath, nodes, edges)
-	WriteGraphistryFile(*graphistrypath, nodes, edges)
-	WriteGEXFFile(*gexfpath, nodes, edges)
-	WriteD3File(*d3path, nodes, edges)
+	writeMaltegoFile(*maltegopath, nodes, edges)
+	writeVisjsFile(*visjspath, nodes, edges)
+	writeGraphistryFile(*graphistrypath, nodes, edges)
+	writeGEXFFile(*gexfpath, nodes, edges)
+	writeD3File(*d3path, nodes, edges)
 }
 
-func WriteVisjsFile(path string, nodes []viz.Node, edges []viz.Edge) {
+func writeMaltegoFile(path string, nodes []viz.Node, edges []viz.Edge) {
 	if path == "" {
 		return
 	}
@@ -73,11 +76,11 @@ func WriteVisjsFile(path string, nodes []viz.Node, edges []viz.Edge) {
 	}
 	defer f.Close()
 
-	viz.WriteVisjsData(nodes, edges, f)
+	viz.WriteMaltegoData(f, nodes, edges)
 	f.Sync()
 }
 
-func WriteGraphistryFile(path string, nodes []viz.Node, edges []viz.Edge) {
+func writeVisjsFile(path string, nodes []viz.Node, edges []viz.Edge) {
 	if path == "" {
 		return
 	}
@@ -88,11 +91,11 @@ func WriteGraphistryFile(path string, nodes []viz.Node, edges []viz.Edge) {
 	}
 	defer f.Close()
 
-	viz.WriteGraphistryData(nodes, edges, f)
+	viz.WriteVisjsData(f, nodes, edges)
 	f.Sync()
 }
 
-func WriteGEXFFile(path string, nodes []viz.Node, edges []viz.Edge) {
+func writeGraphistryFile(path string, nodes []viz.Node, edges []viz.Edge) {
 	if path == "" {
 		return
 	}
@@ -103,11 +106,11 @@ func WriteGEXFFile(path string, nodes []viz.Node, edges []viz.Edge) {
 	}
 	defer f.Close()
 
-	viz.WriteGEXFData(nodes, edges, f)
+	viz.WriteGraphistryData(f, nodes, edges)
 	f.Sync()
 }
 
-func WriteD3File(path string, nodes []viz.Node, edges []viz.Edge) {
+func writeGEXFFile(path string, nodes []viz.Node, edges []viz.Edge) {
 	if path == "" {
 		return
 	}
@@ -118,6 +121,21 @@ func WriteD3File(path string, nodes []viz.Node, edges []viz.Edge) {
 	}
 	defer f.Close()
 
-	viz.WriteD3Data(nodes, edges, f)
+	viz.WriteGEXFData(f, nodes, edges)
+	f.Sync()
+}
+
+func writeD3File(path string, nodes []viz.Node, edges []viz.Edge) {
+	if path == "" {
+		return
+	}
+
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	viz.WriteD3Data(f, nodes, edges)
 	f.Sync()
 }

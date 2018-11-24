@@ -5,7 +5,9 @@ package utils
 
 import (
 	"errors"
+	"io"
 	"io/ioutil"
+	"math/big"
 	"net"
 	"net/http"
 	"strings"
@@ -21,12 +23,35 @@ const (
 
 	// AcceptLang is the default HTTP Accept-Language header value used by Amass.
 	AcceptLang = "en-US,en;q=0.8"
+
+	// AcceptEncoding is the default HTTP Accept-Encoding header value used by Amass.
+	AcceptEncoding = "gzip"
 )
 
-// GetWebPage returns a string containing the entire web page indicated
-// by the url parameter when successful. Header values can optionally be
-// provided using the hvals parameter.
-func GetWebPage(url string, hvals map[string]string) (string, error) {
+// RequestWebPage returns a string containing the entire response for
+// the url parameter when successful.
+func RequestWebPage(url string, body io.Reader, hvals map[string]string, uid, secret string) (string, error) {
+	method := "GET"
+	if body != nil {
+		method = "POST"
+	}
+	req, err := http.NewRequest(method, url, body)
+	if err != nil {
+		return "", err
+	}
+	if uid != "" && secret != "" {
+		req.SetBasicAuth(uid, secret)
+	}
+	req.Header.Set("User-Agent", UserAgent)
+	req.Header.Set("Accept", Accept)
+	req.Header.Set("Accept-Language", AcceptLang)
+	//req.Header.Set("Accept-Encoding", AcceptEncoding)
+	if hvals != nil {
+		for k, v := range hvals {
+			req.Header.Set(k, v)
+		}
+	}
+
 	d := net.Dialer{}
 	client := &http.Client{
 		Timeout: 30 * time.Second,
@@ -38,21 +63,6 @@ func GetWebPage(url string, hvals map[string]string) (string, error) {
 			ExpectContinueTimeout: 5 * time.Second,
 		},
 	}
-
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return "", err
-	}
-
-	req.Header.Add("User-Agent", UserAgent)
-	req.Header.Add("Accept", Accept)
-	req.Header.Add("Accept-Language", AcceptLang)
-	if hvals != nil {
-		for k, v := range hvals {
-			req.Header.Add(k, v)
-		}
-	}
-
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
@@ -79,6 +89,47 @@ func NetHosts(cidr *net.IPNet) []net.IP {
 	}
 	// Remove network address and broadcast address
 	return ips[1 : len(ips)-1]
+}
+
+// NetFirstLast return the first and last IP address of
+// the provided CIDR/netblock.
+func NetFirstLast(cidr *net.IPNet) (net.IP, net.IP) {
+	firstIP := cidr.IP
+	prefixLen, bits := cidr.Mask.Size()
+	if prefixLen == bits {
+		lastIP := make([]byte, len(firstIP))
+		copy(lastIP, firstIP)
+		return firstIP, lastIP
+	}
+	firstIPInt, bits := ipToInt(firstIP)
+	hostLen := uint(bits) - uint(prefixLen)
+	lastIPInt := big.NewInt(1)
+	lastIPInt.Lsh(lastIPInt, hostLen)
+	lastIPInt.Sub(lastIPInt, big.NewInt(1))
+	lastIPInt.Or(lastIPInt, firstIPInt)
+	return firstIP, intToIP(lastIPInt, bits)
+}
+
+func ipToInt(ip net.IP) (*big.Int, int) {
+	val := &big.Int{}
+	val.SetBytes([]byte(ip))
+	if len(ip) == net.IPv4len {
+		return val, 32
+	} else if len(ip) == net.IPv6len {
+		return val, 128
+	}
+	return val, 0
+}
+
+func intToIP(ipInt *big.Int, bits int) net.IP {
+	ipBytes := ipInt.Bytes()
+	ret := make([]byte, bits/8)
+	// Pack our IP bytes into the end of the return array,
+	// since big.Int.Bytes() removes front zero padding.
+	for i := 1; i <= len(ipBytes); i++ {
+		ret[len(ret)-i] = ipBytes[len(ipBytes)-i]
+	}
+	return net.IP(ret)
 }
 
 // RangeHosts returns all the IP addresses (inclusive) between

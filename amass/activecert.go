@@ -11,21 +11,71 @@ import (
 	"fmt"
 	"net"
 	"strconv"
-	"strings"
 	"time"
 
-	"github.com/OWASP/Amass/amass/core"
 	"github.com/OWASP/Amass/amass/utils"
 )
 
 const (
 	defaultTLSConnectTimeout = 3 * time.Second
-	defaultHandshakeDeadline = 10 * time.Second
+	defaultHandshakeDeadline = 5 * time.Second
 )
 
+// ActiveCertService is the AmassService that handles all active certificate activities
+// within the architecture.
+type ActiveCertService struct {
+	BaseAmassService
+
+	maxPulls utils.Semaphore
+}
+
+// NewActiveCertService returns he object initialized, but not yet started.
+func NewActiveCertService(e *Enumeration) *ActiveCertService {
+	acs := &ActiveCertService{maxPulls: utils.NewSimpleSemaphore(25)}
+
+	acs.BaseAmassService = *NewBaseAmassService(e, "Active Cert", acs)
+	return acs
+}
+
+// OnStart implements the AmassService interface
+func (acs *ActiveCertService) OnStart() error {
+	acs.BaseAmassService.OnStart()
+
+	go acs.processRequests()
+	return nil
+}
+
+func (acs *ActiveCertService) processRequests() {
+	for {
+		select {
+		case <-acs.PauseChan():
+			<-acs.ResumeChan()
+		case <-acs.Quit():
+			return
+		case req := <-acs.RequestChan():
+			go acs.performRequest(req)
+		}
+	}
+}
+
+func (acs *ActiveCertService) performRequest(req *AmassRequest) {
+	acs.maxPulls.Acquire(1)
+	defer acs.maxPulls.Release(1)
+
+	acs.SetActive()
+	for _, r := range PullCertificateNames(req.Address, acs.Enum().Config.Ports) {
+		if domain := acs.Enum().Config.WhichDomain(r.Name); domain != "" {
+			r.Domain = domain
+			r.Source = acs.String()
+			acs.Enum().NewNameEvent(r)
+		}
+	}
+	acs.SetActive()
+}
+
 // PullCertificateNames attempts to pull a cert from one or more ports on an IP.
-func PullCertificateNames(addr string, ports []int) []*core.AmassRequest {
-	var requests []*core.AmassRequest
+func PullCertificateNames(addr string, ports []int) []*AmassRequest {
+	var requests []*AmassRequest
 
 	// Check hosts for certificates that contain subdomain names
 	for _, port := range ports {
@@ -82,13 +132,13 @@ func namesFromCert(cert *x509.Certificate) []string {
 
 	var subdomains []string
 	// Add the subject common name to the list of subdomain names
-	commonName := removeAsteriskLabel(cn)
+	commonName := utils.RemoveAsteriskLabel(cn)
 	if commonName != "" {
 		subdomains = append(subdomains, commonName)
 	}
 	// Add the cert DNS names to the list of subdomain names
 	for _, name := range cert.DNSNames {
-		n := removeAsteriskLabel(name)
+		n := utils.RemoveAsteriskLabel(name)
 		if n != "" {
 			subdomains = utils.UniqueAppend(subdomains, n)
 		}
@@ -96,31 +146,14 @@ func namesFromCert(cert *x509.Certificate) []string {
 	return subdomains
 }
 
-func removeAsteriskLabel(s string) string {
-	var index int
-
-	labels := strings.Split(s, ".")
-	for i := len(labels) - 1; i >= 0; i-- {
-		if strings.TrimSpace(labels[i]) == "*" {
-			break
-		}
-		index = i
-	}
-	if index == len(labels)-1 {
-		return ""
-	}
-	return strings.Join(labels[index:], ".")
-}
-
-func reqFromNames(subdomains []string) []*core.AmassRequest {
-	var requests []*core.AmassRequest
+func reqFromNames(subdomains []string) []*AmassRequest {
+	var requests []*AmassRequest
 
 	for _, name := range subdomains {
-		requests = append(requests, &core.AmassRequest{
+		requests = append(requests, &AmassRequest{
 			Name:   name,
 			Domain: SubdomainToDomain(name),
-			Tag:    core.CERT,
-			Source: "Active Cert",
+			Tag:    CERT,
 		})
 	}
 	return requests

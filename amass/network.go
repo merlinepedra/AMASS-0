@@ -16,8 +16,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/OWASP/Amass/amass/core"
-	"github.com/OWASP/Amass/amass/dnssrv"
 	"github.com/OWASP/Amass/amass/utils"
 )
 
@@ -53,7 +51,6 @@ func SubdomainToDomain(name string) string {
 	defer domainLock.Unlock()
 
 	var domain string
-
 	// Obtain all parts of the subdomain name
 	labels := strings.Split(strings.TrimSpace(name), ".")
 	// Check the cache for all parts of the name
@@ -72,9 +69,9 @@ func SubdomainToDomain(name string) string {
 	for i := 0; i < len(labels)-1; i++ {
 		sub := strings.Join(labels[i:], ".")
 
-		core.MaxConnections.Acquire(1)
-		defer core.MaxConnections.Release(1)
-		if ns, err := dnssrv.Resolve(sub, "NS"); err == nil {
+		MaxConnections.Acquire(1)
+		defer MaxConnections.Release(1)
+		if ns, err := Resolve(sub, "NS"); err == nil {
 			pieces := strings.Split(ns[0].Data, ",")
 			domainCache[pieces[0]] = struct{}{}
 			domain = pieces[0]
@@ -94,14 +91,13 @@ func IPRequest(addr string) (int, *net.IPNet, string, error) {
 	if asn != 0 {
 		return asn, cidr, desc, nil
 	}
-	// Need to pull the online data
+
 	record, err := fetchOnlineData(addr, 0)
 	if err != nil {
 		return 0, nil, "", err
 	}
-	// Add it to the cache
+
 	netDataCache[record.ASN] = record
-	// Lets try again
 	asn, cidr, desc = ipSearch(addr)
 	if asn == 0 {
 		return 0, nil, "", fmt.Errorf("IPRequest failed to find data for %s after an online search", addr)
@@ -115,14 +111,12 @@ func ASNRequest(asn int) (*ASRecord, error) {
 	defer netDataLock.Unlock()
 
 	var err error
-
 	record, found := netDataCache[asn]
 	if !found {
 		record, err = fetchOnlineData("", asn)
 		if err != nil {
 			return nil, err
 		}
-		// Insert the AS record into the cache
 		netDataCache[record.ASN] = record
 	}
 	return record, nil
@@ -134,18 +128,16 @@ func CIDRRequest(cidr *net.IPNet) (int, string, error) {
 	defer netDataLock.Unlock()
 
 	asn, desc := cidrSearch(cidr)
-	// Does the data need to be obtained?
 	if asn != 0 {
 		return asn, desc, nil
 	}
-	// Need to pull the online data
+
 	record, err := fetchOnlineData(cidr.IP.String(), 0)
 	if err != nil {
 		return 0, "", err
 	}
-	// Add it to the cache
+
 	netDataCache[record.ASN] = record
-	// Lets try again
 	asn, desc = cidrSearch(cidr)
 	if asn == 0 {
 		return 0, "", fmt.Errorf("CIDRRequest failed to find data for %s after an online search", cidr)
@@ -157,7 +149,6 @@ func cidrSearch(ipnet *net.IPNet) (int, string) {
 	var a int
 	var desc string
 loop:
-	// Check that the necessary data is already cached
 	for asn, record := range netDataCache {
 		for _, netblock := range record.Netblocks {
 			if netblock == ipnet.String() {
@@ -189,7 +180,6 @@ func ipSearch(addr string) (int, *net.IPNet, string) {
 	var desc string
 
 	ip := net.ParseIP(addr)
-	// Check that the necessary data is already cached
 	for asn, record := range netDataCache {
 		for _, netblock := range record.Netblocks {
 			_, ipnet, err := net.ParseCIDR(netblock)
@@ -218,13 +208,13 @@ func fetchOnlineData(addr string, asn int) (*ASRecord, error) {
 
 	var err error
 	var cidr string
-	// If the ASN was not provided, look it up
 	if asn == 0 {
 		asn, cidr, err = originLookup(addr)
 		if err != nil {
 			return nil, err
 		}
 	}
+
 	record, ok := netDataCache[asn]
 	if !ok {
 		// Get the ASN record from the online source
@@ -232,7 +222,6 @@ func fetchOnlineData(addr string, asn int) (*ASRecord, error) {
 		if err != nil {
 			return nil, err
 		}
-		// Get the netblocks associated with this ASN
 		record.Netblocks, err = fetchOnlineNetblockData(asn)
 		if err != nil {
 			return nil, err
@@ -248,10 +237,12 @@ func fetchOnlineData(addr string, asn int) (*ASRecord, error) {
 }
 
 func originLookup(addr string) (int, string, error) {
+	MaxConnections.Acquire(1)
+	defer MaxConnections.Release(1)
+
 	var err error
 	var name string
-	var answers []core.DNSAnswer
-
+	var answers []DNSAnswer
 	if ip := net.ParseIP(addr); len(ip.To4()) == net.IPv4len {
 		name = utils.ReverseIP(addr) + ".origin.asn.cymru.com"
 	} else if len(ip) == net.IPv6len {
@@ -260,10 +251,7 @@ func originLookup(addr string) (int, string, error) {
 		return 0, "", fmt.Errorf("originLookup param is insufficient: addr: %s", ip)
 	}
 
-	core.MaxConnections.Acquire(1)
-	defer core.MaxConnections.Release(1)
-
-	answers, err = dnssrv.Resolve(name, "TXT")
+	answers, err = Resolve(name, "TXT")
 	if err != nil {
 		return 0, "", fmt.Errorf("originLookup: DNS TXT record query error: %s: %v", name, err)
 	}
@@ -277,16 +265,14 @@ func originLookup(addr string) (int, string, error) {
 }
 
 func asnLookup(asn int) (*ASRecord, error) {
-	var err error
-	var answers []core.DNSAnswer
+	MaxConnections.Acquire(1)
+	defer MaxConnections.Release(1)
 
-	// Get the AS record using the ASN
+	var err error
+	var answers []DNSAnswer
 	name := "AS" + strconv.Itoa(asn) + ".asn.cymru.com"
 
-	core.MaxConnections.Acquire(1)
-	defer core.MaxConnections.Release(1)
-
-	answers, err = dnssrv.Resolve(name, "TXT")
+	answers, err = Resolve(name, "TXT")
 	if err != nil {
 		return nil, fmt.Errorf("asnLookup: DNS TXT record query error: %s: %v", name, err)
 	}
@@ -299,13 +285,18 @@ func asnLookup(asn int) (*ASRecord, error) {
 }
 
 func fetchOnlineNetblockData(asn int) ([]string, error) {
-	core.MaxConnections.Acquire(1)
-	defer core.MaxConnections.Release(1)
+	MaxConnections.Acquire(1)
+	defer MaxConnections.Release(1)
+
+	ip := nameToAddress("asn.shadowserver.org")
+	if ip == "" {
+		return nil, errors.New("fetchOnlineNetblockData error: Failed to resolve asn.shadowserver.org")
+	}
+	addr := ip + ":43"
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	addr := "asn.shadowserver.org:43"
 	d := net.Dialer{}
 	conn, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
@@ -329,6 +320,17 @@ func fetchOnlineNetblockData(asn int) ([]string, error) {
 		return nil, errors.New("fetchOnlineNetblockData error: No netblocks acquired")
 	}
 	return blocks, nil
+}
+
+func nameToAddress(name string) string {
+	MaxConnections.Acquire(1)
+	defer MaxConnections.Release(1)
+
+	answers, err := Resolve(name, "A")
+	if err != nil {
+		return ""
+	}
+	return answers[0].Data
 }
 
 func parseASNInfo(line string) *ASRecord {
@@ -364,7 +366,7 @@ func LookupASNsByName(s string) ([]ASRecord, error) {
 
 	s = strings.ToLower(s)
 	url := "https://raw.githubusercontent.com/OWASP/Amass/master/wordlists/asnlist.txt"
-	page, err := utils.GetWebPage(url, nil)
+	page, err := utils.RequestWebPage(url, nil, nil, "", "")
 	if err != nil {
 		return records, err
 	}
@@ -399,7 +401,7 @@ func LookupIPHistory(domain string) ([]string, error) {
 
 	url := "http://viewdns.info/iphistory/?domain=" + domain
 	// The ViewDNS IP History lookup sometimes reveals interesting results
-	page, err := utils.GetWebPage(url, nil)
+	page, err := utils.RequestWebPage(url, nil, nil, "", "")
 	if err != nil {
 		return unique, err
 	}
@@ -421,7 +423,7 @@ func LookupIPHistory(domain string) ([]string, error) {
 func ReverseWhois(domain string) ([]string, error) {
 	var domains []string
 
-	page, err := utils.GetWebPage("http://viewdns.info/reversewhois/?q="+domain, nil)
+	page, err := utils.RequestWebPage("http://viewdns.info/reversewhois/?q="+domain, nil, nil, "", "")
 	if err != nil {
 		return domains, err
 	}

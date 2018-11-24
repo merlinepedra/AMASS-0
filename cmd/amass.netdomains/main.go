@@ -10,31 +10,33 @@ import (
 	"net"
 	"os"
 	"path"
-	"sync"
+	"strings"
 	"time"
 
 	"github.com/OWASP/Amass/amass"
-	"github.com/OWASP/Amass/amass/dnssrv"
 	"github.com/OWASP/Amass/amass/utils"
 )
 
 var (
-	wg      sync.WaitGroup
-	results chan string
+	started   = make(chan struct{}, 50)
+	done      = make(chan struct{}, 50)
+	results   = make(chan string, 100)
+	whoisChan = make(chan string, 100)
 )
 
 func main() {
+	var whois bool
 	var org string
 	var addrs parseIPs
 	var cidrs parseCIDRs
 	var asns, ports parseInts
-	results = make(chan string, 50)
 
 	help := flag.Bool("h", false, "Show the program usage message")
-	flag.StringVar(&org, "org", "", "Search string used against AS description information")
+	flag.StringVar(&org, "org", "", "Search string provided against AS description information")
 	flag.Var(&addrs, "addr", "IPs and ranges (192.168.1.1-254) separated by commas")
 	flag.Var(&cidrs, "cidr", "CIDRs separated by commas (can be used multiple times)")
 	flag.Var(&asns, "asn", "ASNs separated by commas (can be used multiple times)")
+	flag.BoolVar(&whois, "whois", false, "All discovered domains are run through reverse whois")
 	flag.Var(&ports, "p", "Ports separated by commas (default: 443)")
 	flag.Parse()
 
@@ -43,7 +45,11 @@ func main() {
 		flag.PrintDefaults()
 		return
 	}
+	if len(ports) == 0 {
+		ports = []int{443}
+	}
 
+	rand.Seed(time.Now().UTC().UnixNano())
 	if org != "" {
 		records, err := amass.LookupASNsByName(org)
 		if err == nil {
@@ -56,43 +62,97 @@ func main() {
 		return
 	}
 
-	if len(ports) == 0 {
-		ports = []int{443}
-	}
-
-	rand.Seed(time.Now().UTC().UnixNano())
-
-	ips := AllIPsInScope(addrs, cidrs, asns)
+	ips := allIPsInScope(addrs, cidrs, asns)
 	if len(ips) == 0 {
 		fmt.Println("The parameters identified no hosts")
 		return
 	}
-
-	go PullAllCertificates(ips, ports)
-	go PerformAllReverseDNS(ips)
-	go UniquePrint()
-	// Wait for DNS queries and certificate pulls
-	wg.Add(2)
-	wg.Wait()
-	// Wait for all the prints to finish
-	wg.Add(1)
-	close(results)
-	wg.Wait()
-}
-
-func UniquePrint() {
-	filter := make(map[string]struct{})
-
-	for domain := range results {
-		if _, found := filter[domain]; domain != "" && !found {
-			filter[domain] = struct{}{}
-			fmt.Println(domain)
+	// Begin discovering all the domain names
+	go performAllReverseDNS(ips)
+	go pullAllCertificates(ips, ports)
+	// Print all the unique domain names
+	var count int
+	filter := utils.NewStringFilter()
+loop:
+	for {
+		select {
+		case <-started:
+			count++
+		case <-done:
+			count--
+			if count == 0 {
+				break loop
+			}
+		case d := <-results:
+			if !filter.Duplicate(d) {
+				if whois {
+					go getWhoisDomains(d)
+				}
+				fmt.Println(d)
+			}
+		case domain := <-whoisChan:
+			if !filter.Duplicate(domain) {
+				fmt.Println(domain)
+			}
 		}
 	}
-	wg.Done()
 }
 
-func AllIPsInScope(addrs parseIPs, cidrs parseCIDRs, asns parseInts) []net.IP {
+func getWhoisDomains(d string) {
+	domains, err := amass.ReverseWhois(d)
+	if err != nil {
+		return
+	}
+	for _, domain := range domains {
+		if name := strings.TrimSpace(domain); name != "" {
+			results <- name
+		}
+	}
+}
+
+func performAllReverseDNS(ips []net.IP) {
+	for _, ip := range ips {
+		amass.MaxConnections.Acquire(1)
+		started <- struct{}{}
+
+		go func(ip net.IP) {
+			if _, answer, err := amass.Reverse(ip.String()); err == nil {
+				if d := strings.TrimSpace(amass.SubdomainToDomain(answer)); d != "" {
+					results <- d
+				}
+			}
+			amass.MaxConnections.Release(1)
+			done <- struct{}{}
+		}(ip)
+	}
+}
+
+func pullAllCertificates(ips []net.IP, ports parseInts) {
+	maxPulls := utils.NewSimpleSemaphore(100)
+
+	for _, ip := range ips {
+		amass.MaxConnections.Acquire(1)
+		maxPulls.Acquire(1)
+		started <- struct{}{}
+
+		go func(ip net.IP) {
+			var domains []string
+			for _, r := range amass.PullCertificateNames(ip.String(), ports) {
+				domains = utils.UniqueAppend(domains, r.Domain)
+			}
+			for _, domain := range domains {
+				if d := strings.TrimSpace(domain); d != "" {
+					results <- d
+				}
+			}
+			maxPulls.Release(1)
+			amass.MaxConnections.Release(1)
+			done <- struct{}{}
+		}(ip)
+	}
+}
+
+func allIPsInScope(addrs parseIPs, cidrs parseCIDRs, asns parseInts) []net.IP {
 	var ips []net.IP
 
 	ips = append(ips, addrs...)
@@ -117,71 +177,4 @@ func AllIPsInScope(addrs parseIPs, cidrs parseCIDRs, asns parseInts) []net.IP {
 		}
 	}
 	return ips
-}
-
-func PerformAllReverseDNS(ips []net.IP) {
-	var idx int
-	output := make(chan string, 100)
-
-	t := time.NewTicker(time.Millisecond)
-	defer t.Stop()
-loop:
-	for {
-		select {
-		case <-t.C:
-			go ReverseDNS(ips[idx], output)
-			idx++
-			if idx >= len(ips) {
-				break loop
-			}
-		case o := <-output:
-			results <- o
-		}
-	}
-	wg.Done()
-}
-
-func ReverseDNS(ip net.IP, output chan string) {
-	if _, answer, err := dnssrv.Reverse(ip.String()); err == nil {
-		output <- amass.SubdomainToDomain(answer)
-	}
-}
-
-func PullAllCertificates(ips []net.IP, ports parseInts) {
-	var running, idx int
-	done := make(chan struct{}, 100)
-loop:
-	for {
-		select {
-		case <-done:
-			running--
-			if running == 0 && idx >= len(ips) {
-				break loop
-			}
-		default:
-			if running >= 100 || idx >= len(ips) {
-				time.Sleep(100 * time.Millisecond)
-				continue
-			}
-
-			running++
-			addr := ips[idx]
-			go ObtainCert(addr.String(), ports, done)
-			idx++
-		}
-	}
-	wg.Done()
-}
-
-func ObtainCert(addr string, ports parseInts, done chan struct{}) {
-	var domains []string
-
-	for _, r := range amass.PullCertificateNames(addr, ports) {
-		domains = utils.UniqueAppend(domains, r.Domain)
-	}
-
-	for _, domain := range domains {
-		results <- domain
-	}
-	done <- struct{}{}
 }

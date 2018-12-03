@@ -43,7 +43,7 @@ var Banner = `
 
 const (
 	// Version is used to display the current version of Amass.
-	Version = "2.8.4"
+	Version = "2.8.5"
 
 	// Author is used to display the founder of the amass package.
 	Author = "Jeff Foley - @jeff_foley"
@@ -90,13 +90,13 @@ type EnumerationTiming int
 
 // Enumeration is the object type used to execute a DNS enumeration with Amass.
 type Enumeration struct {
-	Config *AmassConfig
+	Config *Config
 
 	// Link graph that collects all the information gathered by the enumeration
 	Graph *Graph
 
 	// The channel that will receive the results
-	Output chan *AmassOutput
+	Output chan *Output
 
 	// Broadcast channel that indicates no further writes to the output channel
 	Done chan struct{}
@@ -117,7 +117,7 @@ type Enumeration struct {
 	altService   *AlterationService
 	bruteService *BruteForceService
 	activeCert   *ActiveCertService
-	dataSources  []AmassService
+	dataSources  []Service
 
 	trustedNameFilter *utils.StringFilter
 	otherNameFilter   *utils.StringFilter
@@ -135,7 +135,7 @@ func init() {
 // NewEnumeration returns an initialized Enumeration that has not been started yet.
 func NewEnumeration() *Enumeration {
 	enum := &Enumeration{
-		Config: &AmassConfig{
+		Config: &Config{
 			Ports:           []int{443},
 			Recursive:       true,
 			MinForRecursive: 1,
@@ -143,7 +143,7 @@ func NewEnumeration() *Enumeration {
 			Timing:          Normal,
 		},
 		Graph:             NewGraph(),
-		Output:            make(chan *AmassOutput, 100),
+		Output:            make(chan *Output, 100),
 		Done:              make(chan struct{}),
 		Log:               log.New(ioutil.Discard, "", 0),
 		trustedNameFilter: utils.NewStringFilter(),
@@ -184,6 +184,9 @@ func (e *Enumeration) CheckConfig() error {
 	if len(e.Config.Wordlist) == 0 {
 		e.Config.Wordlist, err = getDefaultWordlist()
 	}
+	if len(e.Config.DisabledDataSources) > 0 {
+		e.dataSources = e.Config.ExcludeDisabledDataSources(e.dataSources)
+	}
 
 	e.MaxFlow = utils.NewTimedSemaphore(
 		e.Config.Timing.ToMaxFlow(),
@@ -198,7 +201,7 @@ func (e *Enumeration) Start() error {
 	}
 
 	// Select the correct services to be used in this enumeration
-	var services []AmassService
+	var services []Service
 	if !e.Config.Passive {
 		services = append(services, e.dnsService, e.dataService, e.activeCert)
 	}
@@ -274,7 +277,7 @@ func (e *Enumeration) ResumeChan() <-chan struct{} {
 //-------------------------------------------------------------------------------------------------
 
 // NewNameEvent signals the NameService of a newly discovered DNS name.
-func (e *Enumeration) NewNameEvent(req *AmassRequest) {
+func (e *Enumeration) NewNameEvent(req *Request) {
 	if req == nil || req.Name == "" || req.Domain == "" {
 		return
 	}
@@ -295,8 +298,8 @@ func (e *Enumeration) NewNameEvent(req *AmassRequest) {
 	go e.nameService.SendRequest(req)
 }
 
-// NewAddressEvent signals the NameService of a newly discovered DNS name.
-func (e *Enumeration) NewAddressEvent(req *AmassRequest) {
+// NewAddressEvent signals the AddressService of a newly discovered address.
+func (e *Enumeration) NewAddressEvent(req *Request) {
 	if req == nil || req.Address == "" {
 		return
 	}
@@ -304,7 +307,7 @@ func (e *Enumeration) NewAddressEvent(req *AmassRequest) {
 }
 
 // NewSubdomainEvent signals the services of a newly discovered subdomain name.
-func (e *Enumeration) NewSubdomainEvent(req *AmassRequest, times int) {
+func (e *Enumeration) NewSubdomainEvent(req *Request, times int) {
 	if req == nil || req.Name == "" || req.Domain == "" {
 		return
 	}
@@ -321,7 +324,7 @@ func (e *Enumeration) NewSubdomainEvent(req *AmassRequest, times int) {
 }
 
 // ResolveNameEvent sends a request to be resolved by the DNS service.
-func (e *Enumeration) ResolveNameEvent(req *AmassRequest) {
+func (e *Enumeration) ResolveNameEvent(req *Request) {
 	if req == nil || req.Name == "" || req.Domain == "" {
 		if !e.Config.Passive {
 			e.MaxFlow.Release(1)
@@ -340,7 +343,7 @@ func (e *Enumeration) ResolveNameEvent(req *AmassRequest) {
 }
 
 // ResolvedNameEvent signals the NameService of a newly resolved DNS name.
-func (e *Enumeration) ResolvedNameEvent(req *AmassRequest) {
+func (e *Enumeration) ResolvedNameEvent(req *Request) {
 	if !TrustedTag(req.Tag) && e.dnsService.MatchesWildcard(req) {
 		return
 	}
@@ -348,7 +351,7 @@ func (e *Enumeration) ResolvedNameEvent(req *AmassRequest) {
 }
 
 // CheckedNameEvent signals all services interested in acting on new validated DNS names.
-func (e *Enumeration) CheckedNameEvent(req *AmassRequest) {
+func (e *Enumeration) CheckedNameEvent(req *Request) {
 	go e.dataService.SendRequest(req)
 
 	if e.Config.Alterations {
@@ -361,7 +364,7 @@ func (e *Enumeration) CheckedNameEvent(req *AmassRequest) {
 }
 
 // ReverseDNSSweepEvent requests that a reverse DNS sweep be performed.
-func (e *Enumeration) ReverseDNSSweepEvent(req *AmassRequest) {
+func (e *Enumeration) ReverseDNSSweepEvent(req *Request) {
 	if e.Config.Passive {
 		return
 	}
@@ -376,14 +379,14 @@ func (e *Enumeration) ReverseDNSSweepEvent(req *AmassRequest) {
 }
 
 // ActiveCertEvent requests that a certificate be pulled and parsed for DNS names.
-func (e *Enumeration) ActiveCertEvent(req *AmassRequest) {
+func (e *Enumeration) ActiveCertEvent(req *Request) {
 	if e.Config.Active {
 		go e.activeCert.SendRequest(req)
 	}
 }
 
 // OutputEvent sends enumeration output to the package API caller.
-func (e *Enumeration) OutputEvent(out *AmassOutput) {
+func (e *Enumeration) OutputEvent(out *Output) {
 	e.Output <- out
 }
 
@@ -479,8 +482,8 @@ func getDefaultWordlist() ([]string, error) {
 }
 
 // GetAllSources returns a slice of all data source services, initialized and ready.
-func GetAllSources(e *Enumeration) []AmassService {
-	return []AmassService{
+func GetAllSources(e *Enumeration) []Service {
+	return []Service{
 		NewArchiveIt(e),
 		NewArchiveToday(e),
 		NewArquivo(e),
@@ -517,6 +520,16 @@ func GetAllSources(e *Enumeration) []AmassService {
 	}
 }
 
+// GetAllSourceNames returns the names of all the available data sources.
+func (e *Enumeration) GetAllSourceNames() []string {
+	var names []string
+
+	for _, source := range e.dataSources {
+		names = append(names, source.String())
+	}
+	return names
+}
+
 // Clean up the names scraped from the web.
 func cleanName(name string) string {
 	if i := nameStripRE.FindStringIndex(name); i != nil {
@@ -534,7 +547,7 @@ func cleanName(name string) string {
 // Web archive crawler implementation
 //-------------------------------------------------------------------------------------------------
 
-func crawl(service AmassService, base, domain, sub string) ([]string, error) {
+func crawl(service Service, base, domain, sub string) ([]string, error) {
 	var results []string
 	var filterMutex sync.Mutex
 	filter := make(map[string]struct{})
@@ -603,7 +616,7 @@ func linksAndNames(domain string, ctx *fetchbot.Context, res *http.Response, lin
 	// Process the body to find the links
 	doc, err := goquery.NewDocumentFromResponse(res)
 	if err != nil {
-		return fmt.Errorf("Crawler error: %s %s - %s\n", ctx.Cmd.Method(), ctx.Cmd.URL(), err)
+		return fmt.Errorf("crawler error: %s %s - %s", ctx.Cmd.Method(), ctx.Cmd.URL(), err)
 	}
 
 	re := utils.SubdomainRegex(domain)

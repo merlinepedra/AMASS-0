@@ -11,8 +11,8 @@ import (
 	"github.com/OWASP/Amass/amass/utils"
 )
 
-// AmassConfig passes along optional Amass enumeration configurations
-type AmassConfig struct {
+// Config passes along Amass enumeration configurations
+type Config struct {
 	sync.Mutex
 
 	// The ports that will be checked for certificates
@@ -48,6 +48,9 @@ type AmassConfig struct {
 	// A blacklist of subdomain names that will not be investigated
 	Blacklist []string
 
+	// A list of data sources that should not be utilized
+	DisabledDataSources []string
+
 	// The root domain names that the enumeration will target
 	domains []string
 
@@ -58,13 +61,14 @@ type AmassConfig struct {
 	apikeys map[string]*APIKey
 }
 
+// APIKey contains values required for authenticating with web APIs.
 type APIKey struct {
 	UID    string
 	Secret string
 }
 
 // DomainRegex returns the Regexp object for the domain name identified by the parameter.
-func (c *AmassConfig) DomainRegex(domain string) *regexp.Regexp {
+func (c *Config) DomainRegex(domain string) *regexp.Regexp {
 	c.Lock()
 	defer c.Unlock()
 
@@ -75,7 +79,7 @@ func (c *AmassConfig) DomainRegex(domain string) *regexp.Regexp {
 }
 
 // AddDomain appends the domain name provided in the parameter to the list in the configuration.
-func (c *AmassConfig) AddDomain(domain string) {
+func (c *Config) AddDomain(domain string) {
 	c.Lock()
 	defer c.Unlock()
 
@@ -92,7 +96,7 @@ func (c *AmassConfig) AddDomain(domain string) {
 }
 
 // Domains returns the list of domain names currently in the configuration.
-func (c *AmassConfig) Domains() []string {
+func (c *Config) Domains() []string {
 	c.Lock()
 	defer c.Unlock()
 
@@ -100,7 +104,7 @@ func (c *AmassConfig) Domains() []string {
 }
 
 // IsDomainInScope returns true if the DNS name in the parameter ends with a domain in the config list.
-func (c *AmassConfig) IsDomainInScope(name string) bool {
+func (c *Config) IsDomainInScope(name string) bool {
 	var discovered bool
 
 	n := strings.TrimSpace(name)
@@ -114,7 +118,7 @@ func (c *AmassConfig) IsDomainInScope(name string) bool {
 }
 
 // WhichDomain returns the domain in the config list that the DNS name in the parameter end with.
-func (c *AmassConfig) WhichDomain(name string) string {
+func (c *Config) WhichDomain(name string) string {
 	n := strings.TrimSpace(name)
 
 	for _, d := range c.Domains() {
@@ -126,7 +130,7 @@ func (c *AmassConfig) WhichDomain(name string) string {
 }
 
 // Blacklisted returns true is the name in the parameter ends with a subdomain name in the config blacklist.
-func (c *AmassConfig) Blacklisted(name string) bool {
+func (c *Config) Blacklisted(name string) bool {
 	var resp bool
 
 	n := strings.TrimSpace(name)
@@ -139,8 +143,28 @@ func (c *AmassConfig) Blacklisted(name string) bool {
 	return resp
 }
 
+// ExcludeDisabledDataSources returns a list of data sources excluding DisabledDataSources.
+func (c *Config) ExcludeDisabledDataSources(services []Service) []Service {
+	var enabled []Service
+
+	for _, s := range services {
+		include := true
+
+		for _, disabled := range c.DisabledDataSources {
+			if strings.EqualFold(disabled, s.String()) {
+				include = false
+				break
+			}
+		}
+		if include {
+			enabled = append(enabled, s)
+		}
+	}
+	return enabled
+}
+
 // AddAPIKey adds the data source and API key association provided to the configuration.
-func (c *AmassConfig) AddAPIKey(source string, ak *APIKey) {
+func (c *Config) AddAPIKey(source string, ak *APIKey) {
 	c.Lock()
 	defer c.Unlock()
 
@@ -152,7 +176,7 @@ func (c *AmassConfig) AddAPIKey(source string, ak *APIKey) {
 }
 
 // GetAPIKey returns the API key associated with the provided data source name.
-func (c *AmassConfig) GetAPIKey(source string) *APIKey {
+func (c *Config) GetAPIKey(source string) *APIKey {
 	c.Lock()
 	defer c.Unlock()
 

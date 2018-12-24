@@ -6,7 +6,7 @@ jobs:
   test:
     docker:
       # specify the version
-      - image: circleci/golang:1.11.1
+      - image: circleci/golang:1.11.4
       
       # Specify service dependencies here if necessary
       # CircleCI maintains a library of pre-built images
@@ -27,7 +27,7 @@ jobs:
 
   build:
     docker:
-      - image: snapcore/snapcraft:edge
+      - image: snapcore/snapcraft:stable
 
     working_directory: /go/src/github.com/OWASP/Amass
     steps:
@@ -35,7 +35,7 @@ jobs:
 
       - run:
           name: "Build Snap"
-          command: snapcraft
+          command: apt update && snapcraft
       - persist_to_workspace:
           root: .
           paths:

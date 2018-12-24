@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/OWASP/Amass/amass/utils"
 )
@@ -15,12 +16,17 @@ import (
 type Censys struct {
 	BaseService
 
+	API        *APIKey
 	SourceType string
+	RateLimit  time.Duration
 }
 
 // NewCensys returns he object initialized, but not yet started.
 func NewCensys(e *Enumeration) *Censys {
-	c := &Censys{SourceType: CERT}
+	c := &Censys{
+		SourceType: CERT,
+		RateLimit:  3 * time.Second,
+	}
 
 	c.BaseService = *NewBaseService(e, "Censys", c)
 	return c
@@ -30,6 +36,10 @@ func NewCensys(e *Enumeration) *Censys {
 func (c *Censys) OnStart() error {
 	c.BaseService.OnStart()
 
+	c.API = c.Enum().Config.GetAPIKey(c.String())
+	if c.API == nil || c.API.Key == "" || c.API.Secret == "" {
+		c.Enum().Log.Printf("%s: API key data was not provided", c.String())
+	}
 	go c.startRootDomains()
 	go c.processRequests()
 	return nil
@@ -53,6 +63,8 @@ func (c *Censys) startRootDomains() {
 	// Look at each domain provided by the config
 	for _, domain := range c.Enum().Config.Domains() {
 		c.executeQuery(domain)
+		// Honor the rate limit
+		time.Sleep(c.RateLimit)
 	}
 }
 
@@ -60,23 +72,21 @@ func (c *Censys) executeQuery(domain string) {
 	var err error
 	var url, page string
 
-	if key := c.Enum().Config.GetAPIKey(c.String()); key != nil {
-		url = c.restURL()
-
+	if c.API != nil && c.API.Key != "" && c.API.Secret != "" {
 		jsonStr, err := json.Marshal(map[string]string{"query": domain})
 		if err != nil {
 			return
 		}
+
+		url = c.restURL()
 		body := bytes.NewBuffer(jsonStr)
 		headers := map[string]string{"Content-Type": "application/json"}
-		page, err = utils.RequestWebPage(url, body, headers, key.UID, key.Secret)
-		fmt.Println(page)
+		page, err = utils.RequestWebPage(url, body, headers, c.API.Key, c.API.Secret)
 	} else {
 		url = c.webURL(domain)
 
 		page, err = utils.RequestWebPage(url, nil, nil, "", "")
 	}
-
 	if err != nil {
 		c.Enum().Log.Printf("%s: %s: %v", c.String(), url, err)
 		return

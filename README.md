@@ -9,18 +9,33 @@
 [![Chat on Discord](https://img.shields.io/discord/433729817918308352.svg?logo=discord)](https://discord.gg/rtN8GMd) 
 
 
+----
+
+
+<p align="center">
+  <img alt="DNS Enumeration" src="https://github.com/OWASP/Amass/blob/master/images/amass.gif" width="656" height="702" />
+</p>
+
+
+----
+
+
 ## The Official Amass Repository Has Moved
 
 Amass is now an OWASP project and the [OWASP GitHub organization repository](https://github.com/OWASP/Amass) is where all further development and releases will take place.
 
-![Network graph](https://github.com/OWASP/Amass/blob/master/images/network_06092018.png "Amass Network Mapping")
+
+## Documentation
+
+Go to the [User's Guide](https://github.com/OWASP/Amass/blob/master/doc/user_guide.md) for additional information.
 
 
 ## Community
 
 [![Chat on Discord](https://img.shields.io/discord/433729817918308352.svg?logo=discord)](https://discord.gg/rtN8GMd) 
 
-### Author
+
+### Project Lead
 
 Jeff Foley [![Follow on Twitter](https://img.shields.io/twitter/follow/jeff_foley.svg?logo=twitter)](https://twitter.com/jeff_foley) 
 
@@ -58,8 +73,7 @@ This project improves thanks to all the people who contribute:
  - [Go is for everyone](https://changelog.com/gotime/71)
  - [Top Five Ways the Red Team breached the External Perimeter](https://medium.com/@adam.toscher/top-five-ways-the-red-team-breached-the-external-perimeter-262f99dc9d17)
 
-## Amass Terminal Capture 
 
-Presented at Facebook (and shared publically) for the Sept. 2018 OWASP London Chapter meeting:
+ ## Stargazers over Time
 
-[![asciicast](https://asciinema.org/a/v6B1qdMRlLRUflpkwRPhvCTaY.png)](https://asciinema.org/a/v6B1qdMRlLRUflpkwRPhvCTaY)
+ [![Stargazers over Time](https://starcharts.herokuapp.com/OWASP/Amass.svg)](https://starcharts.herokuapp.com/OWASP/Amass)

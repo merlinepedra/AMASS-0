@@ -51,7 +51,7 @@ func (bfs *BruteForceService) processRequests() {
 }
 
 func (bfs *BruteForceService) goodRequest(req *Request) bool {
-	if !bfs.Enum().Config.BruteForcing || !bfs.Enum().Config.Recursive {
+	if !bfs.Enum().Config.BruteForcing {
 		return false
 	}
 
@@ -76,10 +76,7 @@ func (bfs *BruteForceService) goodRequest(req *Request) bool {
 func (bfs *BruteForceService) startRootDomains() {
 	// Look at each domain provided by the config
 	for _, domain := range bfs.Enum().Config.Domains() {
-		bfs.SendRequest(&Request{
-			Name:   domain,
-			Domain: domain,
-		})
+		bfs.performBruteForcing(domain, domain)
 	}
 }
 

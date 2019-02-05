@@ -3,47 +3,129 @@
 
 package amass
 
-/*
 import (
+	"log"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/OWASP/Amass/amass/core"
+	"github.com/miekg/dns"
 )
 
-func TestBruteForceService(t *testing.T) {
-	domains := []string{"claritysec.com", "twitter.com", "google.com", "github.com"}
+var (
+	domains  = []string{"claritysec.com", "twitter.com", "google.com", "github.com"}
+	wordlist = []string{"foo", "bar"}
 
-	config := CustomConfig(&AmassConfig{
-		Wordlist:     []string{"foo", "bar"},
-		BruteForcing: true,
-	})
+	// Resolved requests
+	requests = []*core.Request{
+		&core.Request{
+			Name:    "test.claritysec.com",
+			Domain:  "claritysec.com",
+			Records: []core.DNSAnswer{core.DNSAnswer{Type: int(dns.TypeA)}},
+		},
+		&core.Request{
+			Name:    "test.twitter.com",
+			Domain:  "twitter.com",
+			Records: []core.DNSAnswer{core.DNSAnswer{Type: int(dns.TypeA)}},
+		},
+		&core.Request{
+			Name:    "test.google.com",
+			Domain:  "google.com",
+			Records: []core.DNSAnswer{core.DNSAnswer{Type: int(dns.TypeA)}},
+		},
+		&core.Request{
+			Name:    "test.github.com",
+			Domain:  "github.com",
+			Records: []core.DNSAnswer{core.DNSAnswer{Type: int(dns.TypeA)}},
+		},
+	}
+)
+
+func TestBruteForceRootDomains(t *testing.T) {
+	config := &core.Config{}
+	config.Wordlist = wordlist
 	config.AddDomains(domains)
-	srv := NewBruteForceService(config)
+	config.BruteForcing = true
+
+	buf := new(strings.Builder)
+	config.Log = log.New(buf, "", log.Lmicroseconds)
+
+	out := make(chan *core.Request)
+	bus := core.NewEventBus()
+	bus.Subscribe(core.NewNameTopic, func(req *core.Request) {
+		out <- req
+	})
+	defer bus.Stop()
+
+	srv := NewBruteForceService(config, bus)
 	srv.Start()
+	defer srv.Stop()
 
-	// Setup the results we expect to see
+	expected := len(config.Wordlist) * len(domains)
 	results := make(map[string]int)
-	for _, domain := range domains {
-		for _, word := range config.Wordlist {
-			results[word+"."+domain] = 0
+	done := time.After(time.Second)
+
+loop:
+	for {
+		select {
+		case req := <-out:
+			results[req.Name]++
+		case <-done:
+			break loop
 		}
 	}
 
-	num := len(results)
-	for i := 0; i < num; i++ {
-		req := <-out
-
-		results[req.Name]++
+	if expected != len(results) {
+		t.Errorf("Got %d names, expected %d instead", len(results), expected)
 	}
-
-	if num != len(results) {
-		t.Errorf("BruteForce should have returned %d names, yet returned %d instead", num, len(results))
-	}
-
-	for name, times := range results {
-		if times != 1 {
-			t.Errorf("BruteForce returned a subdomain name, %s, %d number of times", name, times)
-		}
-	}
-
-	srv.Stop()
 }
-*/
+
+func TestBruteForceMinForRecursive(t *testing.T) {
+	config := &core.Config{}
+	config.AddDomains(domains)
+	config.Wordlist = wordlist
+	config.BruteForcing = true
+	config.Recursive = true
+	config.MinForRecursive = 2
+
+	buf := new(strings.Builder)
+	config.Log = log.New(buf, "", log.Lmicroseconds)
+
+	out := make(chan *core.Request)
+	bus := core.NewEventBus()
+	bus.Subscribe(core.NewNameTopic, func(req *core.Request) {
+		out <- req
+	})
+	defer bus.Stop()
+
+	srv := NewBruteForceService(config, bus)
+	srv.Start()
+	defer srv.Stop()
+
+	// Should be filtered
+	bus.Publish(core.NewSubdomainTopic, requests[0], 1)
+
+	// Should pass
+	bus.Publish(core.NewSubdomainTopic, requests[1], 2)
+	bus.Publish(core.NewSubdomainTopic, requests[2], 3)
+	bus.Publish(core.NewSubdomainTopic, requests[3], 4)
+
+	expected := len(config.Wordlist) * (len(requests) - 1 + len(domains))
+	results := make(map[string]int)
+	done := time.After(time.Second)
+
+loop:
+	for {
+		select {
+		case req := <-out:
+			results[req.Name]++
+		case <-done:
+			break loop
+		}
+	}
+
+	if expected != len(results) {
+		t.Errorf("Got %d names, expected %d instead", len(results), expected)
+	}
+}

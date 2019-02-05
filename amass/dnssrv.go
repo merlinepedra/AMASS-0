@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/OWASP/Amass/amass/core"
 	"github.com/OWASP/Amass/amass/utils"
 	"github.com/miekg/dns"
 )
@@ -33,11 +34,11 @@ const (
 
 type wildcard struct {
 	WildcardType int
-	Answers      []DNSAnswer
+	Answers      []core.DNSAnswer
 }
 
 type wildcardRequest struct {
-	Request      *Request
+	Request      *core.Request
 	WildcardType chan int
 }
 
@@ -61,8 +62,9 @@ var (
 // DNSService is the Service that handles all DNS name resolution requests within
 // the architecture. This is achieved by receiving all the DNSQUERY and DNSSWEEP events.
 type DNSService struct {
-	BaseService
+	core.BaseService
 
+	queries          *utils.Queue
 	filter           *utils.StringFilter
 	wildcards        map[string]*wildcard
 	wildcardRequests chan wildcardRequest
@@ -70,8 +72,9 @@ type DNSService struct {
 }
 
 // NewDNSService returns he object initialized, but not yet started.
-func NewDNSService(e *Enumeration) *DNSService {
+func NewDNSService(config *core.Config, bus *core.EventBus) *DNSService {
 	ds := &DNSService{
+		queries:          utils.NewQueue(),
 		filter:           utils.NewStringFilter(),
 		wildcards:        make(map[string]*wildcard),
 		wildcardRequests: make(chan wildcardRequest),
@@ -83,21 +86,32 @@ func NewDNSService(e *Enumeration) *DNSService {
 		}
 	}
 
-	ds.BaseService = *NewBaseService(e, "DNS Service", ds)
+	ds.BaseService = *core.NewBaseService(ds, "DNS Service", config, bus)
 	return ds
 }
 
 // OnStart implements the Service interface
-func (ds DNSService) OnStart() error {
+func (ds *DNSService) OnStart() error {
 	ds.BaseService.OnStart()
 
+	ds.Bus().Subscribe(core.ResolveNameTopic, ds.SendRequest)
+	ds.Bus().Subscribe(core.ReverseSweepTopic, ds.dnsSweep)
+	ds.Bus().Subscribe(core.NewSubdomainTopic, ds.newSubdomain)
 	go ds.processRequests()
+	go ds.processMetrics()
 	go ds.processWildcardRequests()
 
-	for _, domain := range ds.Enum().Config.Domains() {
+	for _, domain := range ds.Config().Domains() {
 		go ds.basicQueries(domain, domain)
 	}
 	return nil
+}
+
+func (ds *DNSService) resolvedName(req *core.Request) {
+	if !TrustedTag(req.Tag) && ds.MatchesWildcard(req) {
+		return
+	}
+	ds.Bus().Publish(core.NameResolvedTopic, req)
 }
 
 func (ds *DNSService) processRequests() {
@@ -113,15 +127,74 @@ func (ds *DNSService) processRequests() {
 	}
 }
 
-func (ds *DNSService) performRequest(req *Request) {
-	defer ds.Enum().MaxFlow.Release(1)
+func (ds *DNSService) processMetrics() {
+	var perSec []int
+
+	last := time.Now()
+	t := time.NewTicker(time.Second)
+	defer t.Stop()
+	logTick := time.NewTicker(time.Minute)
+	defer logTick.Stop()
+
+	for {
+		select {
+		case <-ds.PauseChan():
+			<-ds.ResumeChan()
+		case <-ds.Quit():
+			return
+		case <-t.C:
+			perSec = append(perSec, ds.queriesPerSec(last))
+			last = time.Now()
+		case <-logTick.C:
+			ds.logAvgQueriesPerSec(perSec)
+			perSec = []int{}
+		}
+	}
+}
+
+func (ds *DNSService) sendQueryTime(t time.Time) {
+	ds.queries.Append(t)
+}
+
+func (ds *DNSService) queriesPerSec(last time.Time) int {
+	var num int
+	for {
+		element, ok := ds.queries.Next()
+		if !ok {
+			break
+		}
+		comTime := element.(time.Time)
+		if comTime.After(last) {
+			num++
+		}
+	}
+	return num
+}
+
+func (ds *DNSService) logAvgQueriesPerSec(perSec []int) {
+	var total int
+	for _, s := range perSec {
+		total += s
+	}
+	if num := len(perSec); num > 0 {
+		ds.Config().Log.Printf("Average DNS queries performed: %d/sec", total/num)
+	}
+}
+
+func (ds *DNSService) performRequest(req *core.Request) {
+	if req == nil || req.Name == "" || req.Domain == "" {
+		return
+	}
 
 	ds.SetActive()
-	MaxConnections.Acquire(len(InitialQueryTypes))
-	defer MaxConnections.Release(len(InitialQueryTypes))
+	if ds.Config().Blacklisted(req.Name) || (!TrustedTag(req.Tag) &&
+		ds.GetWildcardType(req) == WildcardTypeDynamic) {
+		return
+	}
 
-	var answers []DNSAnswer
+	var answers []core.DNSAnswer
 	for _, t := range InitialQueryTypes {
+		ds.sendQueryTime(time.Now())
 		if a, err := Resolve(req.Name, t); err == nil {
 			if ds.goodDNSRecords(a) {
 				answers = append(answers, a...)
@@ -131,7 +204,7 @@ func (ds *DNSService) performRequest(req *Request) {
 				break
 			}
 		} else {
-			ds.Enum().Log.Printf("DNS: %v", err)
+			ds.Config().Log.Printf("DNS: %v", err)
 		}
 		ds.SetActive()
 	}
@@ -139,8 +212,8 @@ func (ds *DNSService) performRequest(req *Request) {
 	req.Records = answers
 	if len(req.Records) == 0 {
 		// Check if this unresolved name should be output by the enumeration
-		if ds.Enum().Config.IncludeUnresolvable && ds.Enum().Config.IsDomainInScope(req.Name) {
-			ds.Enum().OutputEvent(&Output{
+		if ds.Config().IncludeUnresolvable && ds.Config().IsDomainInScope(req.Name) {
+			ds.Bus().Publish(core.OutputTopic, &core.Output{
 				Name:   req.Name,
 				Domain: req.Domain,
 				Tag:    req.Tag,
@@ -149,12 +222,10 @@ func (ds *DNSService) performRequest(req *Request) {
 		}
 		return
 	}
-
-	ds.SetActive()
-	ds.Enum().ResolvedNameEvent(req)
+	ds.resolvedName(req)
 }
 
-func (ds *DNSService) goodDNSRecords(records []DNSAnswer) bool {
+func (ds *DNSService) goodDNSRecords(records []core.DNSAnswer) bool {
 	for _, r := range records {
 		if r.Type != int(dns.TypeA) {
 			continue
@@ -169,71 +240,74 @@ func (ds *DNSService) goodDNSRecords(records []DNSAnswer) bool {
 	return true
 }
 
-// NewSubdomain is called by the Name Service when proper subdomains are discovered.
-func (ds *DNSService) NewSubdomain(req *Request, times int) {
-	if times != 1 {
-		return
+func (ds *DNSService) newSubdomain(req *core.Request, times int) {
+	if req != nil && times == 1 {
+		go ds.processSubdomain(req)
 	}
+}
+
+func (ds *DNSService) processSubdomain(req *core.Request) {
 	ds.SetActive()
 	ds.basicQueries(req.Name, req.Domain)
-	go ds.queryServiceNames(req.Name, req.Domain)
+	ds.queryServiceNames(req.Name, req.Domain)
 }
 
 func (ds *DNSService) basicQueries(subdomain, domain string) {
-	var answers []DNSAnswer
-
-	MaxConnections.Acquire(4)
-	defer MaxConnections.Release(4)
+	var answers []core.DNSAnswer
 
 	ds.SetActive()
 	// Obtain the DNS answers for the NS records related to the domain
+	ds.sendQueryTime(time.Now())
 	if ans, err := Resolve(subdomain, "NS"); err == nil {
 		for _, a := range ans {
 			pieces := strings.Split(a.Data, ",")
 			a.Data = pieces[len(pieces)-1]
 
-			if ds.Enum().Config.Active {
+			if ds.Config().Active {
 				go ds.attemptZoneXFR(subdomain, domain, a.Data)
 			}
 			answers = append(answers, a)
 		}
 	} else {
-		ds.Enum().Log.Printf("DNS: NS record query error: %s: %v", subdomain, err)
+		ds.Config().Log.Printf("DNS: NS record query error: %s: %v", subdomain, err)
 	}
 
 	ds.SetActive()
 	// Obtain the DNS answers for the MX records related to the domain
+	ds.sendQueryTime(time.Now())
 	if ans, err := Resolve(subdomain, "MX"); err == nil {
 		for _, a := range ans {
 			answers = append(answers, a)
 		}
 	} else {
-		ds.Enum().Log.Printf("DNS: MX record query error: %s: %v", subdomain, err)
+		ds.Config().Log.Printf("DNS: MX record query error: %s: %v", subdomain, err)
 	}
 
 	ds.SetActive()
 	// Obtain the DNS answers for the SOA records related to the domain
+	ds.sendQueryTime(time.Now())
 	if ans, err := Resolve(subdomain, "SOA"); err == nil {
 		answers = append(answers, ans...)
 	} else {
-		ds.Enum().Log.Printf("DNS: SOA record query error: %s: %v", subdomain, err)
+		ds.Config().Log.Printf("DNS: SOA record query error: %s: %v", subdomain, err)
 	}
 
 	ds.SetActive()
 	// Obtain the DNS answers for the SPF records related to the domain
+	ds.sendQueryTime(time.Now())
 	if ans, err := Resolve(subdomain, "SPF"); err == nil {
 		answers = append(answers, ans...)
 	} else {
-		ds.Enum().Log.Printf("DNS: SPF record query error: %s: %v", subdomain, err)
+		ds.Config().Log.Printf("DNS: SPF record query error: %s: %v", subdomain, err)
 	}
 
 	if len(answers) > 0 {
 		ds.SetActive()
-		ds.Enum().ResolvedNameEvent(&Request{
+		ds.resolvedName(&core.Request{
 			Name:    subdomain,
 			Domain:  domain,
 			Records: answers,
-			Tag:     DNS,
+			Tag:     core.DNS,
 			Source:  "Forward DNS",
 		})
 	}
@@ -244,15 +318,12 @@ func (ds *DNSService) attemptZoneXFR(sub, domain, server string) {
 		return
 	}
 
-	MaxConnections.Acquire(1)
-	defer MaxConnections.Release(1)
-
 	if requests, err := ZoneTransfer(sub, domain, server); err == nil {
 		for _, req := range requests {
-			ds.Enum().ResolvedNameEvent(req)
+			ds.resolvedName(req)
 		}
 	} else {
-		ds.Enum().Log.Printf("DNS: Zone XFR failed: %s: %v", sub, err)
+		ds.Config().Log.Printf("DNS: Zone XFR failed: %s: %v", sub, err)
 	}
 }
 
@@ -264,28 +335,29 @@ func (ds *DNSService) queryServiceNames(subdomain, domain string) {
 		if ds.filter.Duplicate(srvName) {
 			continue
 		}
-
-		MaxConnections.Acquire(1)
+		ds.sendQueryTime(time.Now())
 		if a, err := Resolve(srvName, "SRV"); err == nil {
-			ds.Enum().ResolvedNameEvent(&Request{
+			ds.resolvedName(&core.Request{
 				Name:    srvName,
 				Domain:  domain,
 				Records: a,
-				Tag:     DNS,
+				Tag:     core.DNS,
 				Source:  "Forward DNS",
 			})
 		}
-		MaxConnections.Release(1)
-		ds.SetActive()
 	}
 }
 
-// ReverseDNSSweep is called by the Address Service to perform sweeps across an address range.
-func (ds *DNSService) ReverseDNSSweep(addr string, cidr *net.IPNet) {
+func (ds *DNSService) dnsSweep(addr string, cidr *net.IPNet) {
+	ds.SetActive()
+	go ds.reverseDNSSweep(addr, cidr)
+}
+
+func (ds *DNSService) reverseDNSSweep(addr string, cidr *net.IPNet) {
 	var ips []net.IP
 
 	// Get information about nearby IP addresses
-	if ds.Enum().Config.Active {
+	if ds.Config().Active {
 		ips = utils.CIDRSubset(cidr, addr, 500)
 	} else {
 		ips = utils.CIDRSubset(cidr, addr, 250)
@@ -296,43 +368,38 @@ func (ds *DNSService) ReverseDNSSweep(addr string, cidr *net.IPNet) {
 		if ds.filter.Duplicate(a) {
 			continue
 		}
-		MaxConnections.Acquire(1)
-		ds.Enum().MaxFlow.Acquire(1)
-		go ds.reverseDNSRoutine(a)
+		ds.reverseDNSQuery(a)
 	}
 }
 
-func (ds *DNSService) reverseDNSRoutine(ip string) {
-	defer ds.Enum().MaxFlow.Release(1)
-	defer MaxConnections.Release(1)
-
+func (ds *DNSService) reverseDNSQuery(ip string) {
 	ds.SetActive()
+	ds.sendQueryTime(time.Now())
 	ptr, answer, err := Reverse(ip)
 	if err != nil {
 		return
 	}
 	// Check that the name discovered is in scope
-	domain := ds.Enum().Config.WhichDomain(answer)
+	domain := ds.Config().WhichDomain(answer)
 	if domain == "" {
 		return
 	}
-	ds.Enum().ResolvedNameEvent(&Request{
+	ds.resolvedName(&core.Request{
 		Name:   ptr,
 		Domain: domain,
-		Records: []DNSAnswer{{
+		Records: []core.DNSAnswer{{
 			Name: ptr,
 			Type: 12,
 			TTL:  0,
 			Data: answer,
 		}},
-		Tag:    DNS,
+		Tag:    core.DNS,
 		Source: "Reverse DNS",
 	})
-	ds.SetActive()
 }
 
 // MatchesWildcard returns true if the request provided resolved to a DNS wildcard.
-func (ds *DNSService) MatchesWildcard(req *Request) bool {
+func (ds *DNSService) MatchesWildcard(req *core.Request) bool {
 	res := make(chan int)
 
 	ds.wildcardRequests <- wildcardRequest{
@@ -346,7 +413,7 @@ func (ds *DNSService) MatchesWildcard(req *Request) bool {
 }
 
 // GetWildcardType returns the DNS wildcard type for the provided subdomain name.
-func (ds *DNSService) GetWildcardType(req *Request) int {
+func (ds *DNSService) GetWildcardType(req *core.Request) int {
 	res := make(chan int)
 
 	ds.wildcardRequests <- wildcardRequest{
@@ -368,7 +435,7 @@ func (ds *DNSService) processWildcardRequests() {
 	}
 }
 
-func (ds *DNSService) performWildcardRequest(req *Request) int {
+func (ds *DNSService) performWildcardRequest(req *core.Request) int {
 	base := len(strings.Split(req.Domain, "."))
 	labels := strings.Split(req.Name, ".")
 
@@ -398,7 +465,7 @@ func (ds *DNSService) getWildcard(sub string) *wildcard {
 		}
 		ds.wildcards[sub] = entry
 		// Query multiple times with unlikely names against this subdomain
-		set := make([][]DNSAnswer, numOfWildcardTests)
+		set := make([][]core.DNSAnswer, numOfWildcardTests)
 		for i := 0; i < numOfWildcardTests; i++ {
 			ds.SetActive()
 			a := ds.wildcardTestResults(sub)
@@ -420,16 +487,16 @@ func (ds *DNSService) getWildcard(sub string) *wildcard {
 		if match {
 			entry.WildcardType = WildcardTypeStatic
 			entry.Answers = set[0]
-			ds.Enum().Log.Printf("%s has a static DNS wildcard", sub)
+			ds.Config().Log.Printf("%s has a static DNS wildcard", sub)
 		} else {
 			entry.WildcardType = WildcardTypeDynamic
-			ds.Enum().Log.Printf("%s has a dynamic DNS wildcard", sub)
+			ds.Config().Log.Printf("%s has a dynamic DNS wildcard", sub)
 		}
 	}
 	return entry
 }
 
-func (ds *DNSService) compareAnswers(ans1, ans2 []DNSAnswer) bool {
+func (ds *DNSService) compareAnswers(ans1, ans2 []core.DNSAnswer) bool {
 	var match bool
 loop:
 	for _, a1 := range ans1 {
@@ -443,25 +510,26 @@ loop:
 	return match
 }
 
-func (ds *DNSService) wildcardTestResults(sub string) []DNSAnswer {
-	var answers []DNSAnswer
+func (ds *DNSService) wildcardTestResults(sub string) []core.DNSAnswer {
+	var answers []core.DNSAnswer
 
 	name := UnlikelyName(sub)
 	if name == "" {
 		return nil
 	}
 	// Check if the name resolves
-	MaxConnections.Acquire(3)
+	ds.sendQueryTime(time.Now())
 	if a, err := Resolve(name, "CNAME"); err == nil {
 		answers = append(answers, a...)
 	}
+	ds.sendQueryTime(time.Now())
 	if a, err := Resolve(name, "A"); err == nil {
 		answers = append(answers, a...)
 	}
+	ds.sendQueryTime(time.Now())
 	if a, err := Resolve(name, "AAAA"); err == nil {
 		answers = append(answers, a...)
 	}
-	MaxConnections.Release(3)
 
 	if len(answers) == 0 {
 		return nil

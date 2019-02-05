@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/OWASP/Amass/amass/core"
 	"github.com/OWASP/Amass/amass/utils"
 )
 
@@ -76,8 +77,6 @@ func SubdomainToDomain(name string) string {
 	for i := 0; i < len(labels)-1; i++ {
 		sub := strings.Join(labels[i:], ".")
 
-		MaxConnections.Acquire(1)
-		defer MaxConnections.Release(1)
 		if ns, err := Resolve(sub, "NS"); err == nil {
 			pieces := strings.Split(ns[0].Data, ",")
 			domainCache[pieces[0]] = struct{}{}
@@ -265,12 +264,9 @@ func fetchOnlineData(addr string, asn int) (*ASRecord, error) {
 }
 
 func originLookup(addr string) (int, string, error) {
-	MaxConnections.Acquire(1)
-	defer MaxConnections.Release(1)
-
 	var err error
 	var name string
-	var answers []DNSAnswer
+	var answers []core.DNSAnswer
 	if ip := net.ParseIP(addr); len(ip.To4()) == net.IPv4len {
 		name = utils.ReverseIP(addr) + ".origin.asn.cymru.com"
 	} else if len(ip) == net.IPv6len {
@@ -293,11 +289,8 @@ func originLookup(addr string) (int, string, error) {
 }
 
 func asnLookup(asn int) (*ASRecord, error) {
-	MaxConnections.Acquire(1)
-	defer MaxConnections.Release(1)
-
 	var err error
-	var answers []DNSAnswer
+	var answers []core.DNSAnswer
 	name := "AS" + strconv.Itoa(asn) + ".asn.cymru.com"
 
 	answers, err = Resolve(name, "TXT")
@@ -313,9 +306,6 @@ func asnLookup(asn int) (*ASRecord, error) {
 }
 
 func fetchOnlineNetblockData(asn int) ([]string, error) {
-	MaxConnections.Acquire(1)
-	defer MaxConnections.Release(1)
-
 	ip := nameToAddress("asn.shadowserver.org")
 	if ip == "" {
 		return nil, errors.New("fetchOnlineNetblockData error: Failed to resolve asn.shadowserver.org")
@@ -351,9 +341,6 @@ func fetchOnlineNetblockData(asn int) ([]string, error) {
 }
 
 func nameToAddress(name string) string {
-	MaxConnections.Acquire(1)
-	defer MaxConnections.Release(1)
-
 	answers, err := Resolve(name, "A")
 	if err != nil {
 		return ""

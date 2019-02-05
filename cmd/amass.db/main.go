@@ -15,7 +15,10 @@ import (
 var (
 	help  = flag.Bool("h", false, "Show the program usage message")
 	input = flag.String("i", "", "The Amass data operations JSON file")
-	neo4j = flag.String("neo4j", "", "URL to the Neo4j database")
+	user  = flag.String("u", "", "The database username")
+	pass  = flag.String("p", "", "The database password")
+	neo4j = flag.String("neo4j", "", "URL to the Neo4j database (i.e. localhost:7687)")
+	grem  = flag.String("grem", "", "URL to a Gremlin database (i.e. localhost:8182)")
 )
 
 func main() {
@@ -44,15 +47,28 @@ func main() {
 		return
 	}
 
-	if *neo4j == "" {
-		fmt.Println("The '-neo4j' flag must be provided with the Neo4j connection URL")
+	if *neo4j == "" && *grem == "" {
+		fmt.Println("The '-neo4j' or '-grem' flag must be provided with the connection URL")
 		return
 	}
 
-	db, err := handlers.NewNeo4j(*neo4j)
-	if err != nil {
-		fmt.Println("Failed to connect with the database")
-		return
+	var db handlers.DataHandler
+	if *neo4j != "" {
+		neo, err := handlers.NewNeo4j(*neo4j, *user, *pass, nil)
+		if err != nil {
+			fmt.Println("Failed to connect with the database")
+			return
+		}
+		defer neo.Close()
+		db = neo
+	} else if *grem != "" {
+		g := handlers.NewGremlin(*grem, *user, *pass, nil)
+		if g == nil {
+			fmt.Println("Failed to connect with the database")
+			return
+		}
+		defer g.Close()
+		db = g
 	}
 
 	err = handlers.DataOptsDriver(opts, db)

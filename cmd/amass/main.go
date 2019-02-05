@@ -13,18 +13,32 @@ import (
 	"io"
 	"log"
 	"math/rand"
+	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"path"
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/OWASP/Amass/amass"
+	"github.com/OWASP/Amass/amass/core"
 	"github.com/OWASP/Amass/amass/utils"
 	"github.com/fatih/color"
 )
+
+const (
+	exampleConfigFileURL = "https://github.com/OWASP/Amass/blob/master/examples/amass_config.ini"
+)
+
+// Types that implement the flag.Value interface for parsing
+type parseStrings []string
+type parseIPs []net.IP
+type parseCIDRs []*net.IPNet
+type parseInts []int
 
 type outputParams struct {
 	Enum     *amass.Enumeration
@@ -69,17 +83,17 @@ var (
 	// Command-line switches and provided parameters
 	help          = flag.Bool("h", false, "Show the program usage message")
 	list          = flag.Bool("list", false, "Print the names of all available data sources")
-	version       = flag.Bool("version", false, "Print the version number of this amass binary")
+	vprint        = flag.Bool("version", false, "Print the version number of this amass binary")
+	config        = flag.String("config", "", "Path to the INI configuration file. Additional details below")
 	unresolved    = flag.Bool("include-unresolvable", false, "Output DNS names that did not resolve")
 	ips           = flag.Bool("ip", false, "Show the IP addresses for discovered names")
 	brute         = flag.Bool("brute", false, "Execute brute forcing after searches")
 	active        = flag.Bool("active", false, "Attempt zone transfers and certificate name grabs")
 	norecursive   = flag.Bool("norecursive", false, "Turn off recursive brute forcing")
-	minrecursive  = flag.Int("min-for-recursive", 1, "Number of subdomain discoveries before recursive brute forcing")
+	minrecursive  = flag.Int("min-for-recursive", 0, "Number of subdomain discoveries before recursive brute forcing")
 	passive       = flag.Bool("passive", false, "Disable DNS resolution of names and dependent features")
 	noalts        = flag.Bool("noalts", false, "Disable generation of altered names")
 	sources       = flag.Bool("src", false, "Print data sources for the discovered names")
-	timing        = flag.Int("T", int(amass.Normal), "Timing templates 0 (slowest) through 5 (fastest)")
 	wordlist      = flag.String("w", "", "Path to a different wordlist file")
 	allpath       = flag.String("oA", "", "Path prefix used for naming all output files")
 	logpath       = flag.String("log", "", "Path to the log file where errors will be written")
@@ -104,6 +118,7 @@ func main() {
 		g.Fprintf(color.Error, "Usage: %s [options] <-d domain>\n", path.Base(os.Args[0]))
 		flag.PrintDefaults()
 		g.Fprintln(color.Error, defaultBuf.String())
+		g.Fprintf(color.Error, "An example configuration file can be found here: \n%s\n\n", exampleConfigFileURL)
 		os.Exit(1)
 	}
 
@@ -128,7 +143,7 @@ func main() {
 		}
 		return
 	}
-	if *version {
+	if *vprint {
 		fmt.Fprintf(color.Error, "version %s\n", amass.Version)
 		return
 	}
@@ -155,17 +170,22 @@ func main() {
 	if *includepath != "" {
 		included = utils.UniqueAppend(included, getLinesFromFile(*includepath)...)
 	}
-	if *resolvepath != "" {
-		resolvers = utils.UniqueAppend(resolvers, getLinesFromFile(*resolvepath)...)
-	}
-	amass.SetCustomResolvers(resolvers)
 	if *domainspath != "" {
 		domains = utils.UniqueAppend(domains, getLinesFromFile(*domainspath)...)
 	}
-	if len(domains) == 0 {
-		r.Println("No root domain names were provided")
-		return
+	if *resolvepath != "" {
+		resolvers = utils.UniqueAppend(resolvers, getLinesFromFile(*resolvepath)...)
 	}
+	// Check if a config file was provided that has DNS resolvers specified
+	if *config != "" {
+		if r, err := core.GetResolversFromSettings(*config); err == nil {
+			resolvers = utils.UniqueAppend(resolvers, r...)
+		}
+	}
+	if len(resolvers) > 0 {
+		amass.SetCustomResolvers(resolvers)
+	}
+
 	// Prepare output files
 	logfile := *logpath
 	txt := *outpath
@@ -179,7 +199,7 @@ func main() {
 	}
 	// Seed the default pseudo-random number generator
 	rand.Seed(time.Now().UTC().UnixNano())
-	// Setup the amass configuration
+	// Setup the amass enumeration settings
 	alts := true
 	recursive := true
 	if *noalts {
@@ -188,10 +208,9 @@ func main() {
 	if *norecursive {
 		recursive = false
 	}
-
 	rLog, wLog := io.Pipe()
 	enum := amass.NewEnumeration()
-	enum.Log = log.New(wLog, "", log.Lmicroseconds)
+	enum.Config.Log = log.New(wLog, "", log.Lmicroseconds)
 	enum.Config.Wordlist = words
 	enum.Config.BruteForcing = *brute
 	enum.Config.Recursive = recursive
@@ -199,27 +218,37 @@ func main() {
 	enum.Config.Active = *active
 	enum.Config.IncludeUnresolvable = *unresolved
 	enum.Config.Alterations = alts
-	enum.Config.Timing = amass.EnumerationTiming(*timing)
 	enum.Config.Passive = *passive
 	enum.Config.Blacklist = blacklist
 	enum.Config.DisabledDataSources = compileDisabledSources(enum, included, excluded)
+	// Check if a configuration file was provided, and if so, load the settings
+	if *config != "" {
+		if err := enum.Config.LoadSettings(*config); err != nil {
+			r.Fprintf(color.Error, "Configuration file error: %v\n", err)
+			return
+		}
+	}
 	for _, domain := range domains {
 		enum.Config.AddDomain(domain)
 	}
-	go writeLogsAndMessages(rLog, logfile)
+	if len(enum.Config.Domains()) == 0 {
+		r.Fprintln(color.Error, "No root domain names were provided")
+		return
+	}
 
+	go writeLogsAndMessages(rLog, logfile)
 	// Setup the data operations output file
 	if datafile != "" {
 		fileptr, err := os.OpenFile(datafile, os.O_WRONLY|os.O_CREATE, 0644)
 		if err != nil {
-			r.Printf("Failed to open the data operations output file: %v", err)
+			r.Fprintf(color.Error, "Failed to open the data operations output file: %v\n", err)
 			return
 		}
 		defer func() {
 			fileptr.Sync()
 			fileptr.Close()
 		}()
-		enum.DataOptsWriter = fileptr
+		enum.Config.DataOptsWriter = fileptr
 	}
 
 	finished = make(chan struct{})
@@ -230,15 +259,27 @@ func main() {
 		FileOut:  txt,
 		JSONOut:  jsonfile,
 	})
-	// Execute the signal handler
-	go signalHandler(enum)
 
+	go signalHandler(enum)
 	if err := enum.Start(); err != nil {
 		r.Println(err)
 		return
 	}
 	// Wait for output manager to finish
 	<-finished
+}
+
+// If the user interrupts the program, print the summary information
+func signalHandler(e *amass.Enumeration) {
+	quit := make(chan os.Signal, 1)
+
+	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+
+	<-quit
+	// Start final output operations
+	close(e.Done)
+	<-finished
+	os.Exit(1)
 }
 
 func getLinesFromFile(path string) []string {
@@ -354,11 +395,13 @@ func compileDisabledSources(enum *amass.Enumeration, include, exclude []string) 
 
 func writeLogsAndMessages(logs *io.PipeReader, logfile string) {
 	wildcard := regexp.MustCompile("DNS wildcard")
-	avg := regexp.MustCompile("Average DNS names")
+	avg := regexp.MustCompile("Average DNS queries")
 
 	var filePtr *os.File
 	if logfile != "" {
-		filePtr, err := os.OpenFile(logfile, os.O_WRONLY|os.O_CREATE, 0644)
+		var err error
+
+		filePtr, err = os.OpenFile(logfile, os.O_WRONLY|os.O_CREATE, 0644)
 		if err != nil {
 			r.Fprintf(color.Error, "Failed to open the log file: %v\n", err)
 		} else {
@@ -395,7 +438,7 @@ func writeLogsAndMessages(logs *io.PipeReader, logfile string) {
 	}
 }
 
-func writeJSONData(f *os.File, result *amass.Output) {
+func writeJSONData(f *os.File, result *core.Output) {
 	save := &jsonSave{
 		Name:   result.Name,
 		Domain: result.Domain,
@@ -435,7 +478,7 @@ func printBanner() {
 	y.Fprintf(color.Error, "%s\n\n\n", desc)
 }
 
-func resultToLine(result *amass.Output, params *outputParams) (string, string, string, string) {
+func resultToLine(result *core.Output, params *outputParams) (string, string, string, string) {
 	var source, comma, ips string
 
 	if params.PrintSrc {
@@ -512,7 +555,7 @@ func manageOutput(params *outputParams) {
 	close(finished)
 }
 
-func updateData(output *amass.Output, tags map[string]int, asns map[int]*asnData) {
+func updateData(output *core.Output, tags map[string]int, asns map[int]*asnData) {
 	tags[output.Tag]++
 
 	// Update the ASN information
@@ -577,4 +620,147 @@ func printSummary(total int, tags map[string]int, asns map[int]*asnData) {
 				yellow(cidrstr), yellow(countstr), blue("Subdomain Name(s)"))
 		}
 	}
+}
+
+// parseStrings implementation of the flag.Value interface
+func (p *parseStrings) String() string {
+	if p == nil {
+		return ""
+	}
+	return strings.Join(*p, ",")
+}
+
+func (p *parseStrings) Set(s string) error {
+	if s == "" {
+		return fmt.Errorf("String parsing failed")
+	}
+
+	str := strings.Split(s, ",")
+	for _, s := range str {
+		*p = append(*p, strings.TrimSpace(s))
+	}
+	return nil
+}
+
+// parseInts implementation of the flag.Value interface
+func (p *parseInts) String() string {
+	if p == nil {
+		return ""
+	}
+
+	var nums []string
+	for _, n := range *p {
+		nums = append(nums, strconv.Itoa(n))
+	}
+	return strings.Join(nums, ",")
+}
+
+func (p *parseInts) Set(s string) error {
+	if s == "" {
+		return fmt.Errorf("Integer parsing failed")
+	}
+
+	nums := strings.Split(s, ",")
+	for _, n := range nums {
+		i, err := strconv.Atoi(strings.TrimSpace(n))
+		if err != nil {
+			return err
+		}
+		*p = append(*p, i)
+	}
+	return nil
+}
+
+// parseIPs implementation of the flag.Value interface
+func (p *parseIPs) String() string {
+	if p == nil {
+		return ""
+	}
+
+	var ipaddrs []string
+	for _, ipaddr := range *p {
+		ipaddrs = append(ipaddrs, ipaddr.String())
+	}
+	return strings.Join(ipaddrs, ",")
+}
+
+func (p *parseIPs) Set(s string) error {
+	if s == "" {
+		return fmt.Errorf("IP address parsing failed")
+	}
+
+	ips := strings.Split(s, ",")
+	for _, ip := range ips {
+		// Is this an IP range?
+		err := p.parseRange(ip)
+		if err == nil {
+			continue
+		}
+		addr := net.ParseIP(ip)
+		if addr == nil {
+			return fmt.Errorf("%s is not a valid IP address or range", ip)
+		}
+		*p = append(*p, addr)
+	}
+	return nil
+}
+
+func (p *parseIPs) appendIPs(addrs []net.IP) error {
+	for _, addr := range addrs {
+		*p = append(*p, addr)
+	}
+	return nil
+}
+
+func (p *parseIPs) parseRange(s string) error {
+	twoIPs := strings.Split(s, "-")
+
+	if twoIPs[0] == s {
+		// This is not an IP range
+		return fmt.Errorf("%s is not a valid IP range", s)
+	}
+	start := net.ParseIP(twoIPs[0])
+	end := net.ParseIP(twoIPs[1])
+	if end == nil {
+		num, err := strconv.Atoi(twoIPs[1])
+		if err == nil {
+			end = net.ParseIP(twoIPs[0])
+			end[len(end)-1] = byte(num)
+		}
+	}
+	if start == nil || end == nil {
+		// These should have parsed properly
+		return fmt.Errorf("%s is not a valid IP range", s)
+	}
+	return p.appendIPs(utils.RangeHosts(start, end))
+}
+
+// parseCIDRs implementation of the flag.Value interface
+func (p *parseCIDRs) String() string {
+	if p == nil {
+		return ""
+	}
+
+	var cidrs []string
+	for _, ipnet := range *p {
+		cidrs = append(cidrs, ipnet.String())
+	}
+	return strings.Join(cidrs, ",")
+}
+
+func (p *parseCIDRs) Set(s string) error {
+	if s == "" {
+		return fmt.Errorf("%s is not a valid CIDR", s)
+	}
+
+	cidrs := strings.Split(s, ",")
+	for _, cidr := range cidrs {
+		_, ipnet, err := net.ParseCIDR(cidr)
+		if err != nil {
+			return fmt.Errorf("Failed to parse %s as a CIDR", cidr)
+		}
+
+		*p = append(*p, ipnet)
+	}
+	return nil
 }

@@ -11,8 +11,12 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/http/cookiejar"
+	"net/url"
 	"strings"
 	"time"
+
+	"github.com/caffix/cloudflare-roundtripper/cfrt"
 )
 
 const (
@@ -24,19 +28,63 @@ const (
 
 	// AcceptLang is the default HTTP Accept-Language header value used by Amass.
 	AcceptLang = "en-US,en;q=0.8"
-
-	// AcceptEncoding is the default HTTP Accept-Encoding header value used by Amass.
-	AcceptEncoding = "gzip"
 )
 
+var (
+	defaultClient *http.Client
+)
+
+func init() {
+	jar, _ := cookiejar.New(nil)
+	defaultClient = &http.Client{
+		Timeout: 15 * time.Second,
+		Transport: &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout:   15 * time.Second,
+				KeepAlive: 15 * time.Second,
+				DualStack: true,
+			}).DialContext,
+			MaxIdleConns:          200,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 5 * time.Second,
+			TLSClientConfig:       &tls.Config{InsecureSkipVerify: true},
+		},
+		Jar: jar,
+	}
+	defaultClient.Transport, _ = cfrt.New(defaultClient.Transport)
+}
+
+// CopyCookies copies cookies from one domain to another. Some of our data
+// sources rely on shared auth tokens and this avoids sending extra requests
+// to have the site reissue cookies for the other domains.
+func CopyCookies(src string, dest string) {
+	srcURL, _ := url.Parse(src)
+	destURL, _ := url.Parse(dest)
+	defaultClient.Jar.SetCookies(destURL, defaultClient.Jar.Cookies(srcURL))
+}
+
+// CheckCookie checks if a cookie exists in the cookie jar for a given host
+func CheckCookie(urlString string, cookieName string) bool {
+	cookieURL, _ := url.Parse(urlString)
+	found := false
+	for _, cookie := range defaultClient.Jar.Cookies(cookieURL) {
+		if cookie.Name == cookieName {
+			found = true
+			break
+		}
+	}
+	return found
+}
+
 // RequestWebPage returns a string containing the entire response for
-// the url parameter when successful.
-func RequestWebPage(url string, body io.Reader, hvals map[string]string, uid, secret string) (string, error) {
+// the urlstring parameter when successful.
+func RequestWebPage(urlstring string, body io.Reader, hvals map[string]string, uid, secret string) (string, error) {
 	method := "GET"
 	if body != nil {
 		method = "POST"
 	}
-	req, err := http.NewRequest(method, url, body)
+	req, err := http.NewRequest(method, urlstring, body)
 	if err != nil {
 		return "", err
 	}
@@ -46,26 +94,13 @@ func RequestWebPage(url string, body io.Reader, hvals map[string]string, uid, se
 	req.Header.Set("User-Agent", UserAgent)
 	req.Header.Set("Accept", Accept)
 	req.Header.Set("Accept-Language", AcceptLang)
-	//req.Header.Set("Accept-Encoding", AcceptEncoding)
 	if hvals != nil {
 		for k, v := range hvals {
 			req.Header.Set(k, v)
 		}
 	}
 
-	d := net.Dialer{}
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-		Transport: &http.Transport{
-			DialContext:           d.DialContext,
-			MaxIdleConns:          200,
-			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   10 * time.Second,
-			ExpectContinueTimeout: 5 * time.Second,
-			TLSClientConfig:       &tls.Config{InsecureSkipVerify: true},
-		},
-	}
-	resp, err := client.Do(req)
+	resp, err := defaultClient.Do(req)
 	if err != nil {
 		return "", err
 	} else if resp.StatusCode < 200 || resp.StatusCode >= 300 {

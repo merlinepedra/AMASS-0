@@ -10,17 +10,25 @@
 
 [![Packaging status](https://repology.org/badge/vertical-allrepos/amass.svg)](https://repology.org/metapackage/amass/versions)
 
-## The Official Amass Repository Has Moved
-
 ----
 
 <p align="center">
   <img alt="DNS Enumeration" src="https://github.com/OWASP/Amass/blob/master/images/amass.gif" width="577" height="685" />
 </p>
 
+----
+
+## The Official Amass Repository Has Moved
+
 Amass is now an OWASP project and the [OWASP GitHub organization repository](https://github.com/OWASP/Amass) is where all further development and releases will take place.
 
 The OWASP Amass tool suite obtains subdomain names by scraping data sources, recursive brute forcing, crawling web archives, permuting/altering names and reverse DNS sweeping. Additionally, Amass uses the IP addresses obtained during resolution to discover associated netblocks and ASNs. All the information is then used to build maps of the target networks.
+
+----
+
+## Documentation
+
+Go to the [User's Guide](https://github.com/OWASP/Amass/blob/master/doc/user_guide.md) for additional information.
 
 ## Community
 

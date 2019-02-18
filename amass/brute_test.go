@@ -4,11 +4,6 @@
 package amass
 
 import (
-	"log"
-	"strings"
-	"testing"
-	"time"
-
 	"github.com/OWASP/Amass/amass/core"
 	"github.com/miekg/dns"
 )
@@ -17,8 +12,8 @@ var (
 	domains  = []string{"claritysec.com", "twitter.com", "google.com", "github.com"}
 	wordlist = []string{"foo", "bar"}
 
-	// Resolved requests
-	requests = []*core.Request{
+	// Resolved bruteTestRequests
+	bruteTestRequests = []*core.Request{
 		&core.Request{
 			Name:    "test.claritysec.com",
 			Domain:  "claritysec.com",
@@ -42,6 +37,7 @@ var (
 	}
 )
 
+/*
 func TestBruteForceRootDomains(t *testing.T) {
 	config := &core.Config{}
 	config.Wordlist = wordlist
@@ -104,14 +100,14 @@ func TestBruteForceMinForRecursive(t *testing.T) {
 	defer srv.Stop()
 
 	// Should be filtered
-	bus.Publish(core.NewSubdomainTopic, requests[0], 1)
+	bus.Publish(core.NewSubdomainTopic, bruteTestRequests[0], 1)
 
 	// Should pass
-	bus.Publish(core.NewSubdomainTopic, requests[1], 2)
-	bus.Publish(core.NewSubdomainTopic, requests[2], 3)
-	bus.Publish(core.NewSubdomainTopic, requests[3], 4)
+	bus.Publish(core.NewSubdomainTopic, bruteTestRequests[1], 2)
+	bus.Publish(core.NewSubdomainTopic, bruteTestRequests[2], 3)
+	bus.Publish(core.NewSubdomainTopic, bruteTestRequests[3], 4)
 
-	expected := len(config.Wordlist) * (len(requests) - 1 + len(domains))
+	expected := len(config.Wordlist) * (len(bruteTestRequests) - 1 + len(domains))
 	results := make(map[string]int)
 	done := time.After(time.Second)
 
@@ -129,3 +125,4 @@ loop:
 		t.Errorf("Got %d names, expected %d instead", len(results), expected)
 	}
 }
+*/

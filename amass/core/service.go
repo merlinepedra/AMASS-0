@@ -11,12 +11,24 @@ import (
 	"github.com/OWASP/Amass/amass/utils"
 )
 
+const (
+	// The length of the chan that pulls requests off the queue.
+	ServiceRequestChanLength int = 1000
+)
+
 // Possible values for the AmassService.APIKeyRequired field.
 const (
 	APIKeyRequired int = iota
 	APIKeyNotRequired
 	APIkeyOptional
 )
+
+// ServiceStats provides metrics from an Amass service.
+type ServiceStats struct {
+	DNSQueriesPerSec int
+	NamesRemaining   int
+	AddrsRemaining   int
+}
 
 // Service is the object type for a service running within the Amass enumeration architecture.
 type Service interface {
@@ -45,6 +57,7 @@ type Service interface {
 	// Returns channels that fire during Pause/Resume operations
 	PauseChan() <-chan struct{}
 	ResumeChan() <-chan struct{}
+	RequestLen() int
 
 	// Returns a channel that is closed when the service is stopped
 	Quit() <-chan struct{}
@@ -57,6 +70,9 @@ type Service interface {
 
 	// Returns the event bus that handles communication for the enumeration
 	Bus() *EventBus
+
+	// Returns current ServiceStats that provide performance metrics
+	Stats() *ServiceStats
 }
 
 // BaseService provides common mechanisms to all Amass services in the enumeration architecture.
@@ -89,7 +105,7 @@ func NewBaseService(srv Service, name string, config *Config, bus *EventBus) *Ba
 		name:     name,
 		active:   time.Now(),
 		queue:    utils.NewQueue(),
-		requests: make(chan *Request, 1000),
+		requests: make(chan *Request, ServiceRequestChanLength),
 		pause:    make(chan struct{}, 10),
 		resume:   make(chan struct{}, 10),
 		quit:     make(chan struct{}),
@@ -167,7 +183,7 @@ func (bas *BaseService) OnStop() error {
 
 // SendRequest adds the request provided by the parameter to the service request channel.
 func (bas *BaseService) SendRequest(req *Request) {
-	bas.requests <- req
+	bas.queue.Append(req)
 }
 
 // RequestChan returns the channel that provides new service requests.
@@ -178,7 +194,7 @@ func (bas *BaseService) RequestChan() <-chan *Request {
 func (bas *BaseService) processRequests() {
 	curIdx := 0
 	maxIdx := 7
-	delays := []int{250, 500, 750, 1000, 1250, 1500, 1750, 2000}
+	delays := []int{25, 50, 75, 100, 150, 250, 500, 750}
 
 	for {
 		select {
@@ -197,6 +213,10 @@ func (bas *BaseService) processRequests() {
 			bas.requests <- element.(*Request)
 		}
 	}
+}
+
+func (bas *BaseService) RequestLen() int {
+	return bas.queue.Len()
 }
 
 // IsActive returns true if SetActive has been called for the service within the last 10 seconds.
@@ -246,4 +266,9 @@ func (bas *BaseService) Config() *Config {
 // Bus returns the EventBus that handles communication for the enumeration.
 func (bas *BaseService) Bus() *EventBus {
 	return bas.bus
+}
+
+// Stats returns current ServiceStats that provide performance metrics
+func (bas *BaseService) Stats() *ServiceStats {
+	return new(ServiceStats)
 }

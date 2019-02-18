@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io/ioutil"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/OWASP/Amass/amass/core"
@@ -36,7 +37,7 @@ var Banner = `
 
 const (
 	// Version is used to display the current version of Amass.
-	Version = "2.9.1"
+	Version = "2.9.2"
 
 	// Author is used to display the founder of the amass package.
 	Author = "Jeff Foley - @jeff_foley"
@@ -65,17 +66,22 @@ type Enumeration struct {
 
 	filter      *utils.StringFilter
 	outputQueue *utils.Queue
+
+	metricsLock       sync.RWMutex
+	dnsQueriesPerSec  int
+	dnsNamesRemaining int
 }
 
 // NewEnumeration returns an initialized Enumeration that has not been started yet.
 func NewEnumeration() *Enumeration {
 	e := &Enumeration{
 		Config: &core.Config{
-			UUID: uuid.New(),
-			Log:  log.New(ioutil.Discard, "", 0),
+			UUID:        uuid.New(),
+			Log:         log.New(ioutil.Discard, "", 0),
+			Alterations: true,
+			Recursive:   true,
 		},
 		Bus:         core.NewEventBus(),
-		Graph:       handlers.NewGraph(),
 		Output:      make(chan *core.Output, 100),
 		Done:        make(chan struct{}, 2),
 		pause:       make(chan struct{}, 2),
@@ -96,12 +102,19 @@ func (e *Enumeration) Start() error {
 	} else if err := e.Config.CheckSettings(); err != nil {
 		return err
 	}
-
+	// Select the graph that will store the enumeration findings
 	if e.Config.GremlinURL != "" {
 		gremlin := handlers.NewGremlin(e.Config.GremlinURL,
 			e.Config.GremlinUser, e.Config.GremlinPass, e.Config.Log)
 		e.Graph = gremlin
 		defer gremlin.Close()
+	} else {
+		graph := handlers.NewGraph(e.Config.Dir)
+		if graph == nil {
+			return errors.New("Failed to create the graph")
+		}
+		e.Graph = graph
+		defer graph.Close()
 	}
 
 	e.Bus.Subscribe(core.OutputTopic, e.sendOutput)
@@ -118,14 +131,16 @@ func (e *Enumeration) Start() error {
 		if e.Config.DataOptsWriter != nil {
 			dms.AddDataHandler(handlers.NewDataOptsHandler(e.Config.DataOptsWriter))
 		}
-		services = append(services, NewDNSService(e.Config, e.Bus), dms, NewActiveCertService(e.Config, e.Bus))
+		services = append(services, NewDNSService(e.Config, e.Bus),
+			dms, NewActiveCertService(e.Config, e.Bus))
 	}
 
 	namesrv := NewNameService(e.Config, e.Bus)
 	namesrv.RegisterGraph(e.Graph)
 	services = append(services, namesrv, NewAddressService(e.Config, e.Bus))
 	if !e.Config.Passive {
-		services = append(services, NewAlterationService(e.Config, e.Bus), NewBruteForceService(e.Config, e.Bus))
+		services = append(services, NewAlterationService(e.Config, e.Bus),
+			NewBruteForceService(e.Config, e.Bus))
 	}
 
 	// Grab all the data sources
@@ -136,9 +151,13 @@ func (e *Enumeration) Start() error {
 		}
 	}
 
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go e.checkForOutput(&wg)
+	go e.processOutput(&wg)
 	t := time.NewTicker(3 * time.Second)
-	out := time.NewTicker(5 * time.Second)
-	go e.processOutput()
+	logTick := time.NewTicker(time.Minute)
+	defer logTick.Stop()
 loop:
 	for {
 		select {
@@ -146,12 +165,10 @@ loop:
 			break loop
 		case <-e.PauseChan():
 			t.Stop()
-			out.Stop()
 		case <-e.ResumeChan():
 			t = time.NewTicker(3 * time.Second)
-			out = time.NewTicker(time.Second)
-		case <-out.C:
-			e.checkForOutput()
+		case <-logTick.C:
+			e.processMetrics(services)
 		case <-t.C:
 			done := true
 			for _, srv := range services {
@@ -166,14 +183,53 @@ loop:
 		}
 	}
 	t.Stop()
-	out.Stop()
 	for _, srv := range services {
 		srv.Stop()
 	}
+	wg.Wait()
 	return nil
 }
 
-func (e *Enumeration) processOutput() {
+// DNSQueriesPerSec returns the number of DNS queries the enumeration has performed per second.
+func (e *Enumeration) DNSQueriesPerSec() int {
+	e.metricsLock.RLock()
+	defer e.metricsLock.RUnlock()
+
+	return e.dnsQueriesPerSec
+}
+
+// DNSNamesRemaining returns the number of discovered DNS names yet to be handled by the enumeration.
+func (e *Enumeration) DNSNamesRemaining() int {
+	e.metricsLock.RLock()
+	defer e.metricsLock.RUnlock()
+
+	return e.dnsNamesRemaining
+}
+
+func (e *Enumeration) processMetrics(services []core.Service) {
+	if e.Config.Passive {
+		return
+	}
+
+	var total, remaining int
+	for _, srv := range services {
+		stats := srv.Stats()
+
+		remaining += stats.NamesRemaining
+		total += stats.DNSQueriesPerSec
+	}
+
+	e.Config.Log.Printf("Average DNS queries performed: %d/sec, DNS names remaining: %d", total, remaining)
+
+	e.metricsLock.Lock()
+	e.dnsQueriesPerSec = total
+	e.dnsNamesRemaining = remaining
+	e.metricsLock.Unlock()
+}
+
+func (e *Enumeration) processOutput(wg *sync.WaitGroup) {
+	defer wg.Done()
+
 	curIdx := 0
 	maxIdx := 7
 	delays := []int{250, 500, 750, 1000, 1250, 1500, 1750, 2000}
@@ -192,20 +248,40 @@ loop:
 				continue
 			}
 			curIdx = 0
-			e.Output <- element.(*core.Output)
+			output := element.(*core.Output)
+			if !e.filter.Duplicate(output.Name) {
+				e.Output <- output
+			}
+		}
+	}
+	time.Sleep(5 * time.Second)
+	// Handle all remaining elements on the queue
+	for {
+		element, ok := e.outputQueue.Next()
+		if !ok {
+			break
+		}
+		output := element.(*core.Output)
+		if !e.filter.Duplicate(output.Name) {
+			e.Output <- output
 		}
 	}
 	close(e.Output)
 }
 
-func (e *Enumeration) checkForOutput() {
-	select {
-	case <-e.Done:
-		return
-	default:
-		if out := e.Graph.GetUnreadOutput(e.Config.UUID.String()); len(out) > 0 {
+func (e *Enumeration) checkForOutput(wg *sync.WaitGroup) {
+	t := time.NewTicker(5 * time.Second)
+	defer t.Stop()
+	defer wg.Done()
+loop:
+	for {
+		select {
+		case <-e.Done:
+			break loop
+		case <-t.C:
+			out := e.Graph.GetUnreadOutput(e.Config.UUID.String())
 			for _, o := range out {
-				if time.Now().Add(10*time.Second).After(o.Timestamp) && !e.filter.Duplicate(o.Name) {
+				if time.Now().Add(10 * time.Second).After(o.Timestamp) {
 					e.Graph.MarkAsRead(&handlers.DataOptsParams{
 						UUID:   e.Config.UUID.String(),
 						Name:   o.Name,
@@ -219,6 +295,21 @@ func (e *Enumeration) checkForOutput() {
 			}
 		}
 	}
+	// Handle all remaining pieces of output
+	out := e.Graph.GetUnreadOutput(e.Config.UUID.String())
+	for _, o := range out {
+		if !e.filter.Duplicate(o.Name) {
+			e.Graph.MarkAsRead(&handlers.DataOptsParams{
+				UUID:   e.Config.UUID.String(),
+				Name:   o.Name,
+				Domain: o.Domain,
+			})
+
+			if e.Config.IsDomainInScope(o.Name) {
+				e.outputQueue.Append(o)
+			}
+		}
+	}
 }
 
 func (e *Enumeration) sendOutput(o *core.Output) {
@@ -226,7 +317,7 @@ func (e *Enumeration) sendOutput(o *core.Output) {
 	case <-e.Done:
 		return
 	default:
-		if !e.filter.Duplicate(o.Name) && e.Config.IsDomainInScope(o.Name) {
+		if e.Config.IsDomainInScope(o.Name) {
 			e.outputQueue.Append(o)
 		}
 	}

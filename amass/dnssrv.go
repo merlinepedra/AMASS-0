@@ -18,8 +18,8 @@ var (
 	// InitialQueryTypes include the DNS record types that are
 	// initially requested for a discovered name
 	InitialQueryTypes = []string{
-		"TXT",
 		"CNAME",
+		"TXT",
 		"A",
 		"AAAA",
 	}
@@ -48,7 +48,7 @@ type DNSService struct {
 // NewDNSService returns he object initialized, but not yet started.
 func NewDNSService(config *core.Config, bus *core.EventBus) *DNSService {
 	ds := &DNSService{
-		max:    utils.NewSimpleSemaphore(10000),
+		max:    utils.NewSimpleSemaphore(5000),
 		filter: utils.NewStringFilter(),
 	}
 

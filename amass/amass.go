@@ -5,8 +5,10 @@ package amass
 
 import (
 	"errors"
+	"fmt"
 	"io/ioutil"
 	"log"
+	"strconv"
 	"sync"
 	"time"
 
@@ -14,7 +16,21 @@ import (
 	"github.com/OWASP/Amass/amass/handlers"
 	"github.com/OWASP/Amass/amass/sources"
 	"github.com/OWASP/Amass/amass/utils"
+	"github.com/fatih/color"
 	"github.com/google/uuid"
+)
+
+var (
+	// Colors used to ease the reading of program output
+	y      = color.New(color.FgHiYellow)
+	g      = color.New(color.FgHiGreen)
+	r      = color.New(color.FgHiRed)
+	b      = color.New(color.FgHiBlue)
+	fgR    = color.New(color.FgRed)
+	fgY    = color.New(color.FgYellow)
+	yellow = color.New(color.FgHiYellow).SprintFunc()
+	green  = color.New(color.FgHiGreen).SprintFunc()
+	blue   = color.New(color.FgHiBlue).SprintFunc()
 )
 
 // Banner is the ASCII art logo used within help output.
@@ -37,7 +53,7 @@ var Banner = `
 
 const (
 	// Version is used to display the current version of Amass.
-	Version = "2.9.2"
+	Version = "2.9.3"
 
 	// Author is used to display the founder of the amass package.
 	Author = "Jeff Foley - @jeff_foley"
@@ -151,6 +167,9 @@ func (e *Enumeration) Start() error {
 		}
 	}
 
+	// Use all previously discovered names that are in scope
+	go e.submitKnownNames()
+
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go e.checkForOutput(&wg)
@@ -188,6 +207,33 @@ loop:
 	}
 	wg.Wait()
 	return nil
+}
+
+func (e *Enumeration) submitKnownNames() {
+	for _, enum := range e.Graph.EnumerationList() {
+		var found bool
+
+		for _, domain := range e.Graph.EnumerationDomains(enum) {
+			if e.Config.IsDomainInScope(domain) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			continue
+		}
+
+		for _, o := range e.Graph.GetOutput(enum, true) {
+			if e.Config.IsDomainInScope(o.Name) {
+				e.Bus.Publish(core.NewNameTopic, &core.Request{
+					Name:   o.Name,
+					Domain: o.Domain,
+					Tag:    o.Tag,
+					Source: o.Source,
+				})
+			}
+		}
+	}
 }
 
 // DNSQueriesPerSec returns the number of DNS queries the enumeration has performed per second.
@@ -279,7 +325,7 @@ loop:
 		case <-e.Done:
 			break loop
 		case <-t.C:
-			out := e.Graph.GetUnreadOutput(e.Config.UUID.String())
+			out := e.Graph.GetOutput(e.Config.UUID.String(), false)
 			for _, o := range out {
 				if time.Now().Add(10 * time.Second).After(o.Timestamp) {
 					e.Graph.MarkAsRead(&handlers.DataOptsParams{
@@ -296,7 +342,7 @@ loop:
 		}
 	}
 	// Handle all remaining pieces of output
-	out := e.Graph.GetUnreadOutput(e.Config.UUID.String())
+	out := e.Graph.GetOutput(e.Config.UUID.String(), false)
 	for _, o := range out {
 		if !e.filter.Duplicate(o.Name) {
 			e.Graph.MarkAsRead(&handlers.DataOptsParams{
@@ -360,4 +406,121 @@ func (e *Enumeration) GetAllSourceNames() []string {
 		names = append(names, source.String())
 	}
 	return names
+}
+
+// ASNSummaryData stores information related to discovered ASs and netblocks.
+type ASNSummaryData struct {
+	Name      string
+	Netblocks map[string]int
+}
+
+// UpdateSummaryData updates the summary maps using the provided core.Output data
+func UpdateSummaryData(output *core.Output, tags map[string]int, asns map[int]*ASNSummaryData) {
+	tags[output.Tag]++
+
+	for _, addr := range output.Addresses {
+		data, found := asns[addr.ASN]
+		if !found {
+			asns[addr.ASN] = &ASNSummaryData{
+				Name:      addr.Description,
+				Netblocks: make(map[string]int),
+			}
+			data = asns[addr.ASN]
+		}
+		// Increment how many IPs were in this netblock
+		data.Netblocks[addr.Netblock.String()]++
+	}
+}
+
+// PrintEnumerationSummary outputs the summary information utilized by the command-line tools.
+func PrintEnumerationSummary(total int, tags map[string]int, asns map[int]*ASNSummaryData) {
+	pad := func(num int, chr string) {
+		for i := 0; i < num; i++ {
+			b.Fprint(color.Error, chr)
+		}
+	}
+
+	fmt.Fprintln(color.Error)
+	// Print the header information
+	title := "OWASP Amass v"
+	site := "https://github.com/OWASP/Amass"
+	b.Fprint(color.Error, title+Version)
+	num := 80 - (len(title) + len(Version) + len(site))
+	pad(num, " ")
+	b.Fprintf(color.Error, "%s\n", site)
+	pad(8, "----------")
+	fmt.Fprintf(color.Error, "\n%s%s", yellow(strconv.Itoa(total)), green(" names discovered - "))
+	// Print the stats using tag information
+	num, length := 1, len(tags)
+	for k, v := range tags {
+		fmt.Fprintf(color.Error, "%s: %s", green(k), yellow(strconv.Itoa(v)))
+		if num < length {
+			g.Fprint(color.Error, ", ")
+		}
+		num++
+	}
+	fmt.Fprintln(color.Error)
+
+	if len(asns) == 0 {
+		return
+	}
+	// Another line gets printed
+	pad(8, "----------")
+	fmt.Fprintln(color.Error)
+	// Print the ASN and netblock information
+	for asn, data := range asns {
+		fmt.Fprintf(color.Error, "%s%s %s %s\n",
+			blue("ASN: "), yellow(strconv.Itoa(asn)), green("-"), green(data.Name))
+
+		for cidr, ips := range data.Netblocks {
+			countstr := fmt.Sprintf("\t%-4s", strconv.Itoa(ips))
+			cidrstr := fmt.Sprintf("\t%-18s", cidr)
+
+			fmt.Fprintf(color.Error, "%s%s %s\n",
+				yellow(cidrstr), yellow(countstr), blue("Subdomain Name(s)"))
+		}
+	}
+}
+
+// PrintBanner outputs the Amass banner the same for all tools.
+func PrintBanner() {
+	y := color.New(color.FgHiYellow)
+	r := color.New(color.FgHiRed)
+	rightmost := 76
+	version := "Version " + Version
+	desc := "In-depth DNS Enumeration and Network Mapping"
+	author := "Authored By " + Author
+
+	pad := func(num int) {
+		for i := 0; i < num; i++ {
+			fmt.Fprint(color.Error, " ")
+		}
+	}
+	r.Fprintln(color.Error, Banner)
+	pad(rightmost - len(version))
+	y.Fprintln(color.Error, version)
+	pad(rightmost - len(author))
+	y.Fprintln(color.Error, author)
+	pad(rightmost - len(desc))
+	y.Fprintf(color.Error, "%s\n\n\n", desc)
+}
+
+// OutputLineParts returns the parts of a line to be printed for a core.Output.
+func OutputLineParts(out *core.Output, src, addrs bool) (source, name, ips string) {
+	if src {
+		source = fmt.Sprintf("%-18s", "["+out.Source+"] ")
+	}
+	if addrs {
+		for i, a := range out.Addresses {
+			if i != 0 {
+				ips += ","
+			}
+			ips += a.Address.String()
+		}
+		if ips == "" {
+			ips = "N/A"
+		}
+	}
+	name = out.Name
+	return
 }

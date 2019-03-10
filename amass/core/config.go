@@ -62,7 +62,13 @@ type Config struct {
 	MinForRecursive int `ini:"minimum_for_recursive"`
 
 	// Will discovered subdomain name alterations be generated?
-	Alterations bool `ini:"alterations"`
+	Alterations    bool
+	FlipWords      bool
+	FlipNumbers    bool
+	AddWords       bool
+	AddNumbers     bool
+	MinForWordFlip int
+	EditDistance   int
 
 	// Only access the data sources for names and return results?
 	Passive bool
@@ -139,11 +145,23 @@ func (c *Config) AddDomain(domain string) {
 	c.Lock()
 	defer c.Unlock()
 
+	// Check that the domain string is not empty
 	d := strings.TrimSpace(domain)
 	if d == "" {
 		return
 	}
-
+	// Check that it is a domain with at least two labels
+	labels := strings.Split(d, ".")
+	if len(labels) < 2 {
+		return
+	}
+	// Check that none of the labels are empty
+	for _, label := range labels {
+		if label == "" {
+			return
+		}
+	}
+	// Add the domain string to the list
 	c.domains = utils.UniqueAppend(c.domains, d)
 	if c.regexps == nil {
 		c.regexps = make(map[string]*regexp.Regexp)
@@ -302,13 +320,38 @@ func (c *Config) LoadSettings(path string) error {
 		c.GremlinUser = gremlin.Key("username").String()
 		c.GremlinPass = gremlin.Key("password").String()
 	}
+
+	// Load alteration settings
+	if alterations, err := cfg.GetSection("alterations"); err == nil {
+		c.Alterations = alterations.Key("enabled").MustBool(true)
+
+		if c.Alterations {
+			c.FlipWords = alterations.Key("flip_words").MustBool(true)
+			c.AddWords = alterations.Key("add_words").MustBool(true)
+			c.FlipNumbers = alterations.Key("flip_numbers").MustBool(true)
+			c.AddNumbers = alterations.Key("add_numbers").MustBool(true)
+			c.MinForWordFlip = alterations.Key("minimum_for_word_flip").MustInt(2)
+			c.EditDistance = alterations.Key("edit_distance").MustInt(1)
+		}
+	}
 	// Load up all API key information from data source sections
+	nonAPISections := []string{
+		"alterations",
+		"default",
+		"domains",
+		"resolvers",
+		"blacklisted",
+		"disabled_data_sources",
+		"gremlin",
+	}
+outer:
 	for _, section := range cfg.Sections() {
 		name := section.Name()
 		// Skip sections that are not related to data sources
-		if name == "default" || name == "domains" || name == "resolvers" ||
-			name == "blacklisted" || name == "disabled_data_sources" || name == "gremlin" {
-			continue
+		for _, doneSection := range nonAPISections {
+			if name == doneSection {
+				continue outer
+			}
 		}
 
 		key := new(APIKey)

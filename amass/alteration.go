@@ -6,21 +6,62 @@ package amass
 import (
 	"strconv"
 	"strings"
+	"sync"
 	"unicode"
 
 	"github.com/OWASP/Amass/amass/core"
+	"github.com/OWASP/Amass/amass/utils"
 	"github.com/miekg/dns"
 )
 
-// AlterationService is the Service that handles all DNS name permutation within
-// the architecture. This is achieved by receiving all the RESOLVED events.
+type alterationCache struct {
+	sync.RWMutex
+	cache map[string]int
+}
+
+func newAlterationCache(seed []string) *alterationCache {
+	ac := &alterationCache{
+		cache: make(map[string]int),
+	}
+
+	ac.Lock()
+	for _, word := range seed {
+		ac.cache[word] = 0
+	}
+	ac.Unlock()
+
+	return ac
+}
+
+func (ac *alterationCache) update(word string) int {
+	ac.Lock()
+	if _, ok := ac.cache[word]; ok {
+		ac.cache[word]++
+	} else {
+		ac.cache[word] = 1
+	}
+	count := ac.cache[word]
+	ac.Unlock()
+	return count
+}
+
+// AlterationService is the Service that handles all DNS name permutations within
+// the architecture.
 type AlterationService struct {
 	core.BaseService
+
+	filter   *utils.StringFilter
+	prefixes *alterationCache
+	suffixes *alterationCache
 }
 
 // NewAlterationService returns he object initialized, but not yet started.
 func NewAlterationService(config *core.Config, bus *core.EventBus) *AlterationService {
-	as := new(AlterationService)
+	as := &AlterationService{
+		filter:   utils.NewStringFilter(),
+		prefixes: newAlterationCache(altWords),
+		suffixes: newAlterationCache(altWords),
+	}
 
 	as.BaseService = *core.NewBaseService(as, "Alterations", config, bus)
 	return as
@@ -52,13 +93,33 @@ func (as *AlterationService) processRequests() {
 
 // executeAlterations runs all the DNS name alteration methods as goroutines.
 func (as *AlterationService) executeAlterations(req *core.Request) {
-	if !as.correctRecordTypes(req) || !as.Config().IsDomainInScope(req.Name) {
+	if !as.correctRecordTypes(req) ||
+		!as.Config().IsDomainInScope(req.Name) ||
+		(len(strings.Split(req.Domain, ".")) == len(strings.Split(req.Name, "."))) {
+		return
+	}
+
+	if as.filter.Duplicate(req.Name) {
 		return
 	}
 
 	as.SetActive()
-	as.flipNumbersInName(req)
-	as.appendNumbers(req)
+	if as.Config().FlipNumbers {
+		as.flipNumbersInName(req)
+	}
+	if as.Config().AddNumbers {
+		as.appendNumbers(req)
+	}
+	if as.Config().FlipWords {
+		as.flipWords(req)
+	}
+	if as.Config().AddWords {
+		as.addSuffixWord(req)
+		as.addPrefixWord(req)
+	}
+	if as.Config().EditDistance > 0 {
+		as.fuzzyLabelSearches(req)
+	}
 }
 
 func (as *AlterationService) correctRecordTypes(req *core.Request) bool {
@@ -72,6 +133,39 @@ func (as *AlterationService) correctRecordTypes(req *core.Request) bool {
 		}
 	}
 	return ok
+}
+
+func (as *AlterationService) flipWords(req *core.Request) {
+	names := strings.SplitN(req.Name, ".", 2)
+	subdomain := names[0]
+	domain := names[1]
+
+	parts := strings.Split(subdomain, "-")
+	if len(parts) < 2 {
+		return
+	}
+
+	pre := parts[0]
+	as.prefixes.update(pre)
+	as.prefixes.RLock()
+	for k, count := range as.prefixes.cache {
+		if count >= as.Config().MinForWordFlip {
+			newName := k + "-" + strings.Join(parts[1:], "-") + "." + domain
+			as.sendAlteredName(newName, req.Domain)
+		}
+	}
+	as.prefixes.RUnlock()
+
+	post := parts[len(parts)-1]
+	as.suffixes.update(post)
+	as.suffixes.RLock()
+	for k, count := range as.suffixes.cache {
+		if count >= as.Config().MinForWordFlip {
+			newName := strings.Join(parts[:len(parts)-1], "-") + "-" + k + "." + domain
+			as.sendAlteredName(newName, req.Domain)
+		}
+	}
+	as.suffixes.RUnlock()
 }
 
 // flipNumbersInName flips numbers in a subdomain name.
@@ -114,21 +208,137 @@ func (as *AlterationService) secondNumberFlip(name, domain string, minIndex int)
 
 // appendNumbers appends a number to a subdomain name.
 func (as *AlterationService) appendNumbers(req *core.Request) {
-	n := req.Name
-	parts := strings.SplitN(n, ".", 2)
+	parts := strings.SplitN(req.Name, ".", 2)
 
 	for i := 0; i < 10; i++ {
-		// Send a LABEL-NUM altered name
-		nhn := parts[0] + "-" + strconv.Itoa(i) + "." + parts[1]
-		as.sendAlteredName(nhn, req.Domain)
-		// Send a LABELNUM altered name
-		nn := parts[0] + strconv.Itoa(i) + "." + parts[1]
-		as.sendAlteredName(nn, req.Domain)
+		as.addSuffix(parts, strconv.Itoa(i), req.Domain)
 	}
+}
+
+func (as *AlterationService) addSuffix(parts []string, suffix, domain string) {
+	nn := parts[0] + suffix + "." + parts[1]
+	as.sendAlteredName(nn, domain)
+
+	nn = parts[0] + "-" + suffix + "." + parts[1]
+	as.sendAlteredName(nn, domain)
+}
+
+func (as *AlterationService) addPrefix(name, prefix, domain string) {
+	nn := prefix + name
+	as.sendAlteredName(nn, domain)
+
+	nn = prefix + "-" + name
+	as.sendAlteredName(nn, domain)
+}
+
+func (as *AlterationService) addSuffixWord(req *core.Request) {
+	parts := strings.SplitN(req.Name, ".", 2)
+
+	as.suffixes.RLock()
+	for word, count := range as.suffixes.cache {
+		if count >= as.Config().MinForWordFlip {
+			as.addSuffix(parts, word, req.Domain)
+		}
+	}
+	as.suffixes.RUnlock()
+}
+
+func (as *AlterationService) addPrefixWord(req *core.Request) {
+	as.prefixes.RLock()
+	for word, count := range as.prefixes.cache {
+		if count >= as.Config().MinForWordFlip {
+			as.addPrefix(req.Name, word, req.Domain)
+		}
+	}
+	as.prefixes.RUnlock()
+}
+
+func (as *AlterationService) fuzzyLabelSearches(req *core.Request) {
+	parts := strings.SplitN(req.Name, ".", 2)
+
+	results := []string{parts[0]}
+	for i := 0; i < as.Config().EditDistance; i++ {
+		var conv []string
+
+		conv = append(conv, as.additions(results)...)
+		conv = append(conv, as.deletions(results)...)
+		conv = append(conv, as.substitutions(results)...)
+		results = append(results, conv...)
+	}
+
+	for _, alt := range results {
+		name := alt + "." + parts[1]
+
+		as.sendAlteredName(name, req.Domain)
+	}
+}
+
+func (as *AlterationService) additions(set []string) []string {
+	ldh := []rune(ldhChars)
+	ldhLen := len(ldh)
+
+	var results []string
+	for _, str := range set {
+		rstr := []rune(str)
+		rlen := len(rstr)
+
+		for i := 0; i <= rlen; i++ {
+			for j := 0; j < ldhLen; j++ {
+				temp := append(rstr, ldh[0])
+
+				copy(temp[i+1:], temp[i:])
+				temp[i] = ldh[j]
+				results = append(results, string(temp))
+			}
+		}
+	}
+	return results
+}
+
+func (as *AlterationService) deletions(set []string) []string {
+	var results []string
+
+	for _, str := range set {
+		rstr := []rune(str)
+		rlen := len(rstr)
+
+		for i := 0; i < rlen; i++ {
+			if del := string(append(rstr[:i], rstr[i+1:]...)); del != "" {
+				results = append(results, del)
+			}
+		}
+	}
+	return results
+}
+
+func (as *AlterationService) substitutions(set []string) []string {
+	ldh := []rune(ldhChars)
+	ldhLen := len(ldh)
+
+	var results []string
+	for _, str := range set {
+		rstr := []rune(str)
+		rlen := len(rstr)
+
+		for i := 0; i < rlen; i++ {
+			temp := rstr
+
+			for j := 0; j < ldhLen; j++ {
+				temp[i] = ldh[j]
+				results = append(results, string(temp))
+			}
+		}
+	}
+	return results
 }
 
 // sendAlteredName checks that the provided name is valid before publishing it as a new name.
 func (as *AlterationService) sendAlteredName(name, domain string) {
+	name = strings.Trim(name, "-")
+	if name == "" {
+		return
+	}
+
 	re := as.Config().DomainRegex(domain)
 	if re == nil || !re.MatchString(name) {
 		return

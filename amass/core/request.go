@@ -67,7 +67,8 @@ type Output struct {
 // AddressInfo stores all network addressing info for the Output type.
 type AddressInfo struct {
 	Address     net.IP     `json:"ip"`
-	Netblock    *net.IPNet `json:"cidr"`
+	Netblock    *net.IPNet `json:"-"`
+	CIDRStr     string     `json:"cidr"`
 	ASN         int        `json:"asn"`
 	Description string     `json:"desc"`
 }

@@ -36,24 +36,24 @@ var (
 // Banner is the ASCII art logo used within help output.
 var Banner = `
 
-        .+++:.            :                             .+++.                   
-      +W@@@@@@8        &+W@#               o8W8:      +W@@@@@@#.   oW@@@W#+     
-     &@#+   .o@##.    .@@@o@W.o@@o       :@@#&W8o    .@#:  .:oW+  .@#+++&#&     
-    +@&        &@&     #@8 +@W@&8@+     :@W.   +@8   +@:          .@8           
-    8@          @@     8@o  8@8  WW    .@W      W@+  .@W.          o@#:         
-    WW          &@o    &@:  o@+  o@+   #@.      8@o   +W@#+.        +W@8:       
-    #@          :@W    &@+  &@+   @8  :@o       o@o     oW@@W+        oW@8      
-    o@+          @@&   &@+  &@+   #@  &@.      .W@W       .+#@&         o@W.    
-     WW         +@W@8. &@+  :&    o@+ #@      :@W&@&         &@:  ..     :@o    
-     :@W:      o@# +Wo &@+        :W: +@W&o++o@W. &@&  8@#o+&@W.  #@:    o@+    
-      :W@@WWWW@@8       +              :&W@@@@&    &W  .o#@@W&.   :W@WWW@@&     
-        +o&&&&+.                                                    +oooo.      
+        .+++:.            :                             .+++.
+      +W@@@@@@8        &+W@#               o8W8:      +W@@@@@@#.   oW@@@W#+
+     &@#+   .o@##.    .@@@o@W.o@@o       :@@#&W8o    .@#:  .:oW+  .@#+++&#&
+    +@&        &@&     #@8 +@W@&8@+     :@W.   +@8   +@:          .@8
+    8@          @@     8@o  8@8  WW    .@W      W@+  .@W.          o@#:
+    WW          &@o    &@:  o@+  o@+   #@.      8@o   +W@#+.        +W@8:
+    #@          :@W    &@+  &@+   @8  :@o       o@o     oW@@W+        oW@8
+    o@+          @@&   &@+  &@+   #@  &@.      .W@W       .+#@&         o@W.
+     WW         +@W@8. &@+  :&    o@+ #@      :@W&@&         &@:  ..     :@o
+     :@W:      o@# +Wo &@+        :W: +@W&o++o@W. &@&  8@#o+&@W.  #@:    o@+
+      :W@@WWWW@@8       +              :&W@@@@&    &W  .o#@@W&.   :W@WWW@@&
+        +o&&&&+.                                                    +oooo.
 
 `
 
 const (
 	// Version is used to display the current version of Amass.
-	Version = "2.9.3"
+	Version = "2.9.4"
 
 	// Author is used to display the founder of the amass package.
 	Author = "Jeff Foley - @jeff_foley"
@@ -75,6 +75,7 @@ type Enumeration struct {
 	Done chan struct{}
 
 	dataSources []core.Service
+	bruteSrv    core.Service
 
 	// Pause/Resume channels for halting the enumeration
 	pause  chan struct{}
@@ -92,10 +93,16 @@ type Enumeration struct {
 func NewEnumeration() *Enumeration {
 	e := &Enumeration{
 		Config: &core.Config{
-			UUID:        uuid.New(),
-			Log:         log.New(ioutil.Discard, "", 0),
-			Alterations: true,
-			Recursive:   true,
+			UUID:           uuid.New(),
+			Log:            log.New(ioutil.Discard, "", 0),
+			Alterations:    true,
+			FlipWords:      true,
+			FlipNumbers:    true,
+			AddWords:       true,
+			AddNumbers:     true,
+			MinForWordFlip: 2,
+			EditDistance:   1,
+			Recursive:      true,
 		},
 		Bus:         core.NewEventBus(),
 		Output:      make(chan *core.Output, 100),
@@ -155,8 +162,8 @@ func (e *Enumeration) Start() error {
 	namesrv.RegisterGraph(e.Graph)
 	services = append(services, namesrv, NewAddressService(e.Config, e.Bus))
 	if !e.Config.Passive {
-		services = append(services, NewAlterationService(e.Config, e.Bus),
-			NewBruteForceService(e.Config, e.Bus))
+		e.bruteSrv = NewBruteForceService(e.Config, e.Bus)
+		services = append(services, NewAlterationService(e.Config, e.Bus), e.bruteSrv)
 	}
 
 	// Grab all the data sources
@@ -169,12 +176,17 @@ func (e *Enumeration) Start() error {
 
 	// Use all previously discovered names that are in scope
 	go e.submitKnownNames()
+	// Start with the first domain name provided by the configuration
+	var domainIdx int
+	e.releaseDomainName(domainIdx)
 
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go e.checkForOutput(&wg)
 	go e.processOutput(&wg)
-	t := time.NewTicker(3 * time.Second)
+
+	tickSeconds := 3
+	t := time.NewTicker(time.Duration(3) * time.Second)
 	logTick := time.NewTicker(time.Minute)
 	defer logTick.Stop()
 loop:
@@ -185,9 +197,12 @@ loop:
 		case <-e.PauseChan():
 			t.Stop()
 		case <-e.ResumeChan():
-			t = time.NewTicker(3 * time.Second)
+			t = time.NewTicker(time.Duration(3) * time.Second)
 		case <-logTick.C:
-			e.processMetrics(services)
+			if !e.Config.Passive {
+				e.Config.Log.Printf("Average DNS queries performed: %d/sec, DNS names remaining: %d",
+					e.DNSQueriesPerSec(), e.DNSNamesRemaining())
+			}
 		case <-t.C:
 			done := true
 			for _, srv := range services {
@@ -198,7 +213,20 @@ loop:
 			}
 			if done {
 				close(e.Done)
+				continue
 			}
+
+			if !e.Config.Passive {
+				e.processMetrics(services)
+				psec := e.DNSQueriesPerSec()
+				// Check if it's too soon to release the next domain name
+				if psec > 0 && ((e.DNSNamesRemaining()*len(InitialQueryTypes))/psec) > tickSeconds {
+					continue
+				}
+			}
+			// Check if the next domain should be sent to data sources/brute forcing
+			domainIdx++
+			e.releaseDomainName(domainIdx)
 		}
 	}
 	t.Stop()
@@ -207,6 +235,25 @@ loop:
 	}
 	wg.Wait()
 	return nil
+}
+
+func (e *Enumeration) releaseDomainName(idx int) {
+	domains := e.Config.Domains()
+
+	if idx >= len(domains) {
+		return
+	}
+
+	for _, srv := range append(e.dataSources, e.bruteSrv) {
+		if srv == nil {
+			continue
+		}
+
+		srv.SendRequest(&core.Request{
+			Name:   domains[idx],
+			Domain: domains[idx],
+		})
+	}
 }
 
 func (e *Enumeration) submitKnownNames() {
@@ -253,10 +300,6 @@ func (e *Enumeration) DNSNamesRemaining() int {
 }
 
 func (e *Enumeration) processMetrics(services []core.Service) {
-	if e.Config.Passive {
-		return
-	}
-
 	var total, remaining int
 	for _, srv := range services {
 		stats := srv.Stats()
@@ -264,8 +307,6 @@ func (e *Enumeration) processMetrics(services []core.Service) {
 		remaining += stats.NamesRemaining
 		total += stats.DNSQueriesPerSec
 	}
-
-	e.Config.Log.Printf("Average DNS queries performed: %d/sec, DNS names remaining: %d", total, remaining)
 
 	e.metricsLock.Lock()
 	e.dnsQueriesPerSec = total
